@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__gemini__gemini-query",
+      "Bash(npm --version)",
+      "Bash(git:*)",
+      "Bash(npm create:*)",
+      "Bash(rustc --version)",
+      "Bash(/c/Users/User/.cargo/bin/cargo check:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(npm run:*)",
+      "Bash(npm test:*)",
+      "Bash(cargo test:*)"
+    ]
+  }
+}

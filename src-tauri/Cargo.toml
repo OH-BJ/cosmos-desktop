@@ -1,0 +1,31 @@
+[package]
+name = "cosmos-desktop"
+version = "0.1.0"
+description = "무한 줌 3D 우주 캔버스 파일 탐색기"
+authors = ["cosmos-desktop contributors"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "cosmos_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+# SQL 플러그인: SQLite 지속성 관리 (마이그레이션, 쿼리 실행)
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 에러 핸들링: Rust 에러를 사용자 메시지로 변환할 때 사용
+thiserror = "1"
+# 비동기 런타임: Tauri 내부에도 포함되지만 명시적으로 depend
+tokio = { version = "1", features = ["full"] }
+

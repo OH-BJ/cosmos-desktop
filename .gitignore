@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────
+# cosmos-desktop — .gitignore
+# Node / Rust / Tauri / 환경파일 / OS / 에디터
+# ─────────────────────────────────────────────
+
+# Node
+node_modules
+dist
+dist-ssr
+*.local
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Rust / Cargo
+target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Tauri 빌드 산출물
+src-tauri/target
+src-tauri/gen
+src-tauri/Cargo.lock.bak
+
+# 환경변수 (샘플 파일은 커밋)
+.env
+.env.*
+!.env.example
+
+# 에디터 / IDE
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS 노이즈
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# 테스트 / 커버리지
+coverage
+.nyc_output
+playwright-report
+test-results
+
+# 벤치마크 결과 (대용량 JSON 등)
+benchmarks/results

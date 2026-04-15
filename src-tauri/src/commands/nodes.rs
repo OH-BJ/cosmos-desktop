@@ -16,6 +16,18 @@ use crate::ipc_types::Node;
 /// 3. 프론트엔드에서 호출 가능하게 등록하기
 /// 위 세 가지를 자동 생성. 매크로가 없으면 수동으로 이 모든 걸 해야 함.
 ///
+/// # async 키워드가 필요한 이유
+///
+/// Rust의 async/await 문법: 함수가 "동시성"을 지원하게 만든다.
+/// Tauri는 IPC 핸들러를 내부 tokio 비동기 런타임에서 실행한다.
+/// 따라서 command 함수는 반드시 async 함수여야 하고,
+/// 나중에 DB 쿼리(tauri-plugin-sql의 execute())나 파일 I/O가 들어오면
+/// `.await`로 완료를 기다릴 수 있다.
+/// 현재는 DB가 없어서 await 블록이 없어 보이지만,
+/// 마일스톤 2에서 실제 DB I/O가 들어오면:
+///   let nodes = db.query_all_nodes().await?;  // await 필수
+/// 로 변환된다.
+///
 /// # 반환 타입 Result<Vec<Node>, String>
 /// - `Ok(Vec<Node>)` — 성공, 노드 배열 반환
 /// - `Err(String)` — 실패, 에러 메시지 반환 (사용자가 이해할 수 있는 한국어여야 함)

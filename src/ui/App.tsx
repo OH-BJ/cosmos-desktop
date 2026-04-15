@@ -36,8 +36,18 @@ function App() {
    * 4) 렌더 루프 설정
    *
    * cleanup: unmount 시 리소스 정리 (dispose)
+   *
+   * M5 개선: React 19 StrictMode에서 useEffect는 개발 환경에서
+   * mount → cleanup → mount로 2회 실행되므로, 만약 cleanup이 비동기로
+   * 지연되거나 누락되는 엣지 케이스가 있을 경우 중복 Scene을 생성할 수 있음.
+   * 이를 방지하려고 sceneRef.current 가드를 추가.
    */
   useEffect(() => {
+    // M5: 중복 마운트 방지 가드.
+    // React 19 StrictMode dev에서 cleanup 후 재진입 시 sceneRef가 null이므로
+    // 이 가드는 과민하게 작동하지 않고, 엣지 케이스(cleanup 지연)만 방어.
+    if (sceneRef.current) return;
+
     if (!containerRef.current) {
       console.error("Container ref not available");
       return;

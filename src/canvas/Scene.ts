@@ -16,6 +16,7 @@ export class Scene {
   private renderer: THREE.WebGLRenderer;
   private animationId: number | null = null;
   private onRender: (() => void) | null = null;
+  private resizeHandler: (() => void) | null = null; // C2 버그 수정: resize 리스너 참조 저장
 
   constructor() {
     // three.js의 Scene 개념: 렌더링할 모든 오브젝트(메시, 라이트, 카메라)를 담는 컨테이너
@@ -58,8 +59,11 @@ export class Scene {
 
     // 창 리사이즈 시 카메라/렌더러 동기화
     // (고성능: debounce 없이 매번 실행. 나중에 필요하면 throttle 추가)
-    const onResize = () => this.handleResize();
-    window.addEventListener("resize", onResize);
+    // C2 버그 수정: 리스너 함수를 클래스 멤버에 저장해야 dispose에서 제거 가능.
+    // window.addEventListener와 removeEventListener는 참조 동일성으로 매칭하므로,
+    // 클로저나 화살표 함수를 쓰면 참조가 달라져서 리스너 제거 불가능.
+    this.resizeHandler = () => this.handleResize();
+    window.addEventListener("resize", this.resizeHandler);
 
     // requestAnimationFrame 루프 시작
     this.startAnimationLoop();
@@ -156,6 +160,14 @@ export class Scene {
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
       this.animationId = null;
+    }
+
+    // C2 버그 수정: resize 리스너 제거.
+    // removeEventListener는 **정확히 같은 함수 참조**를 요구하므로,
+    // mount()에서 저장한 this.resizeHandler를 명시적으로 제거.
+    if (this.resizeHandler) {
+      window.removeEventListener("resize", this.resizeHandler);
+      this.resizeHandler = null;
     }
 
     // Renderer 정리: WebGL 컨텍스트 해제

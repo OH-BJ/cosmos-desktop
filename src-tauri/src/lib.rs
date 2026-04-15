@@ -28,5 +28,22 @@ pub fn run() {
             commands::nodes::get_nodes
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        // expect() 대신 명시적 에러 처리로 변경
+        //
+        // CLAUDE.md §6-3 규칙: 프로덕션 코드에서 unwrap()/expect()를 사용하면
+        // 에러 발생 시 사용자에게 Rust panic 스택 트레이스를 노출하게 된다.
+        // Tauri 앱이 시작 불가 상태가 되어도 사용자가 이해할 수 있는 메시지를 줘야 한다.
+        //
+        // 여기서 Result를 더 이상 전파하지 않는 이유:
+        // - pub fn run()의 시그니처가 이미 정해져 있음
+        // - main.rs에서 호출하는 코드 체인을 바꾸지 않기 위해
+        // - Tauri의 tauri::Builder::run()은 자체적으로 panic을 조용히 처리하는데,
+        //   여기서 Err을 반환하면 호출자(main)가 처리할 책임이 생김
+        // 따라서 이 경계에서 에러를 "소비"하고, 사용자 메시지로 변환 후 종료하는 게 맞음.
+        .map_err(|e| {
+            // 사용자가 이해할 수 있는 한국어 메시지로 변환
+            eprintln!("cosmos-desktop 실행 실패: {}", e);
+            eprintln!("자세한 정보를 위해 관리자에게 문의하세요.");
+        })
+        .ok(); // Result를 버림 (에러는 이미 eprintln!으로 처리했으므로)
 }

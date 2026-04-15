@@ -5,7 +5,20 @@ use std::path::Path;
 use thiserror::Error;
 
 /// 경로 검증 에러
-/// thiserror 매크로가 Display 트레잇을 자동 생성해서 사용자 메시지 출력 가능하게 함
+///
+/// # thiserror 매크로 설명
+///
+/// thiserror는 Rust의 trait implementation 자동 생성 매크로.
+/// #[error(...)] 어트리뷰트에 지정한 문자열이 각 enum variant별
+/// Display::fmt() 구현으로 자동 확장된다.
+/// 예를 들어:
+///   #[error("시스템 디렉터리 접근 불가: {0}")]
+///   SystemDirectory(String)
+/// 이면, SystemDirectory(path)를 println!("{}", err) 하면
+/// "시스템 디렉터리 접근 불가: /System" 같이 표시된다.
+///
+/// 수동으로 impl Display for SafetyError { ... } 를 쓰는 것과 동일한 결과지만,
+/// 매크로가 컴파일 타임에 자동 생성해줘서 코드가 짧고 휴먼 에러가 적다.
 #[derive(Debug, Error)]
 pub enum SafetyError {
     #[error("시스템 디렉터리 접근 불가: {0}")]

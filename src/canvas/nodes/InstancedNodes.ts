@@ -13,6 +13,7 @@ import * as THREE from "three";
 export class InstancedNodes {
   private mesh: THREE.InstancedMesh;
   private count: number = 0; // 현재 활성 노드 개수
+  private capacity: number; // 최대 인스턴스 수 (정확한 capacity 체크용)
 
   constructor(capacity: number = 1024) {
     // three.js InstancedMesh 개념:
@@ -33,6 +34,7 @@ export class InstancedNodes {
     // InstancedMesh(geometry, material, capacity)
     // capacity: 최대 몇 개까지 인스턴싱할지 (동적 확장은 나중)
     this.mesh = new THREE.InstancedMesh(geometry, material, capacity);
+    this.capacity = capacity; // capacity를 별도 멤버에 저장 (C1 버그 수정)
 
     // 초기 노드 1개를 원점 (0, 0, 0)에 배치
     const matrix = new THREE.Matrix4();
@@ -56,9 +58,20 @@ export class InstancedNodes {
    * @param y 월드 좌표 y
    * @param z 월드 좌표 z
    * @returns 할당된 인스턴스 인덱스 (나중에 updateNode에서 사용)
+   *
+   * 주의: this.capacity와 this.count를 구분해야 함.
+   * - this.capacity: 생성자에서 받은 최대 인스턴스 수
+   * - this.count: 현재 활성 노드 개수
+   * - this.mesh.count: three.js의 "렌더할 활성 인스턴스 수" (GPU 드로우 시 사용)
+   *
+   * 원래 버그: `if (this.count >= this.mesh.count)` 였으나,
+   * addNode 직후 `this.mesh.count = this.count`를 대입하므로 비교식이 count >= count 가 되어
+   * capacity 가드가 완전히 무력화됨. 이를 `this.capacity`로 교체.
+   * (three.js의 InstancedMesh.count는 배열 용량이 아니라 "현재 렌더 중인 인스턴스 수"이므로
+   *  용량 체크에 사용하면 안 됨)
    */
   addNode(x: number, y: number, z: number): number {
-    if (this.count >= this.mesh.count) {
+    if (this.count >= this.capacity) {
       console.warn("InstancedMesh capacity exceeded. Need to grow buffer.");
       return -1; // 오버플로우 (M2에서 동적 확장 구현)
     }

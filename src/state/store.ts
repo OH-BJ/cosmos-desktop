@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { subscribeWithSelector } from "zustand/middleware";
 
 /**
  * Node — 논리 노드 타입 (Zustand 저빈도 상태용)
@@ -6,7 +7,7 @@ import { create } from "zustand";
  * 이 타입은 src-tauri/src/ipc_types.rs의 Rust Node 구조체와 일치해야 함.
  * IPC 통신 시 serde로 자동 변환되므로, 필드명과 타입이 정확히 매칭되어야 함.
  *
- * @property id 고유 식별자 (파일 경로 또는 UUID)
+ * @property id UUID v7 형식 문자열 (M2_ENTER_CRITERIA 확정)
  * @property path 파일 시스템 경로
  * @property x, y, z 우주 공간 좌표 (메타데이터용, 실제 렌더링은 TypedArray buffer 사용)
  */
@@ -17,6 +18,38 @@ export interface Node {
   y: number;
   z: number;
 }
+
+/**
+ * M2 하드코딩 테스트 노드 3개 (PLAN_M2 Step 1 작업 7).
+ *
+ * UUID v7 형식 문자열을 결정론적으로 사용 (테스트/디버그 시 예측 가능).
+ * 실제 M3에서 Rust IPC가 DB에서 노드를 로드하면 이 배열은 제거된다.
+ *
+ * 좌표는 Orthographic 카메라 뷰포트(±960 × ±540) 안쪽에 흩뿌림.
+ */
+const INITIAL_TEST_NODES: Node[] = [
+  {
+    id: "01900000-0000-7000-8000-000000000001",
+    path: "/test/node-a",
+    x: -200,
+    y: 100,
+    z: 0,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000000002",
+    path: "/test/node-b",
+    x: 0,
+    y: -150,
+    z: 0,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000000003",
+    path: "/test/node-c",
+    x: 250,
+    y: 80,
+    z: 0,
+  },
+];
 
 /**
  * CosmosStore — Zustand 저빈도 상태 (선택, 메뉴, 설정 등)
@@ -47,10 +80,13 @@ interface CosmosStore {
  * 상태 변경 시 컴포넌트 리렌더 트리거됨.
  * 렌더 루프에서는 절대 이 훅을 호출하면 안 됨 (성능 저하).
  */
-export const useCosmosStore = create<CosmosStore>((set) => ({
-  nodes: [],
+export const useCosmosStore = create<CosmosStore>()(subscribeWithSelector((set) => ({
+  // 초기 상태: M2 하드코딩 테스트 노드 3개.
+  // bridge.setupStoreSynchronization의 초기 동기화 호출 시점에 이 노드들이
+  // NodeBuffer → InstancedMesh로 전파되어 화면에 보이게 된다.
+  nodes: INITIAL_TEST_NODES,
   setNodes: (nodes: Node[]) => set({ nodes }),
 
   selectedNodeId: null,
   selectNode: (id: string | null) => set({ selectedNodeId: id }),
-}));
+})));

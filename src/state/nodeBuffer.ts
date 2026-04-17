@@ -6,7 +6,12 @@
  *
  * 구조:
  * - Float32Array positions: [x0, y0, z0, x1, y1, z1, ...] stride=3
- * - Uint32Array ids: [id0, id1, id2, ...]
+ *
+ * ID 전략 (M2 확정):
+ * - 도메인 계층: Node.id는 UUID v7 String (Zustand store)
+ * - 렌더링 계층: positions 배열의 인덱스 i 자체가 렌더링 ID (Buffer Index)
+ * - 양방향 매핑은 bridge.ts가 담당 (idToIndex Map + indexToId 배열)
+ * - 따라서 이 버퍼에는 별도 ids 배열이 불필요
  *
  * 왜 TypedArray를 쓰나?
  * 1) JS 객체 배열 → 노드당 메모리 오버헤드 큼 (해시맵, 프로토타입 등)
@@ -21,16 +26,16 @@
 export const INITIAL_CAPACITY = 1024;
 
 /**
- * NodeBuffer — 노드 좌표/ID를 저장하는 저수준 버퍼
+ * NodeBuffer — 노드 좌표를 저장하는 저수준 버퍼
  *
  * @property positions Float32Array (stride 3: x, y, z)
- * @property ids Uint32Array
  * @property capacity 최대 수용 노드 수
  * @property count 현재 활성 노드 수
+ *
+ * ID 매핑은 bridge.ts에서 별도 관리 (Buffer Index 전략)
  */
 export interface NodeBuffer {
   positions: Float32Array;
-  ids: Uint32Array;
   capacity: number;
   count: number;
 }
@@ -49,10 +54,6 @@ export function allocateNodeBuffer(
     // 예: capacity=1024 → Float32Array 길이 3072
     // 액세스: node i의 x = positions[i*3], y = positions[i*3+1], z = positions[i*3+2]
     positions: new Float32Array(capacity * 3),
-
-    // ids: 노드 인스턴스 ID. 나중에 Zustand 스토어와 매칭할 때 사용
-    // (부동소수점 오버플로우 회피, 정수 ID 안전)
-    ids: new Uint32Array(capacity),
 
     capacity,
     count: 0,
@@ -79,9 +80,8 @@ export function growNodeBuffer(
 
   const newBuffer = allocateNodeBuffer(newCapacity);
 
-  // 기존 데이터 복사
+  // 기존 데이터 복사 (positions만 — ID 매핑은 bridge.ts 관할)
   newBuffer.positions.set(buffer.positions.subarray(0, buffer.count * 3));
-  newBuffer.ids.set(buffer.ids.subarray(0, buffer.count));
   newBuffer.count = buffer.count;
 
   return newBuffer;
@@ -90,17 +90,18 @@ export function growNodeBuffer(
 /**
  * pushNode() — 버퍼에 노드 한 개 추가
  *
+ * 반환값: 추가된 노드의 Buffer Index (bridge.ts가 UUID 매핑에 사용)
+ *
  * @param buffer NodeBuffer
  * @param x, y, z 좌표
- * @param id 노드 ID
+ * @returns 추가된 노드의 인덱스 (= Buffer Index)
  */
 export function pushNode(
   buffer: NodeBuffer,
   x: number,
   y: number,
-  z: number,
-  id: number
-): void {
+  z: number
+): number {
   if (buffer.count >= buffer.capacity) {
     throw new Error(
       `NodeBuffer overflow: count=${buffer.count}, capacity=${buffer.capacity}`
@@ -111,9 +112,9 @@ export function pushNode(
   buffer.positions[idx * 3] = x;
   buffer.positions[idx * 3 + 1] = y;
   buffer.positions[idx * 3 + 2] = z;
-  buffer.ids[idx] = id;
 
   buffer.count++;
+  return idx;
 }
 
 /**

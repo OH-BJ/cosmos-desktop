@@ -1,5 +1,23 @@
 # M2 진입 조건 (Enter Criteria)
 
+## ✅ 확정 결과 (2026-04-16)
+
+3단계 교차검증 완료: 웹 Claude → Gemini Pro(웹) → 웹 Claude Planner.
+
+| 항목 | 결정 |
+|---|---|
+| 1. ID 전략 | B안 발전형 (UUID v7 + Buffer Index) |
+| 2. bridge.ts | 문서 그대로 + 항목 1 반영 |
+| 3. FS IPC | 문서 + timestamp 필드 추가 |
+| 4. validate_path | 함수 2개로 분리 |
+| 5. CSP | 문서 그대로 (방향성만) |
+
+C안 기각 근거: Birthday Paradox 수식으로 10만 노드에서 u32 해시 충돌 확률 68.8% 증명.
+
+상세 근거는 웹 Claude 대화 기록 참조. ADR 형태로 ARCHITECTURE.md에도 반영 예정.
+
+---
+
 > 이 문서는 **M2 스프린트를 시작하기 전에 합의되어 있어야 하는** 설계 결정들의 목록이다.
 > Day 2 Review Day (2026-04-15) 결과, 아래 5가지를 M1 마무리 시점에서 확정하지 않으면
 > M2 코드가 쌓일수록 리팩터 부담이 기하급수로 커지는 것으로 판단됐다.

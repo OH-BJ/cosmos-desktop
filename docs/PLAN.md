@@ -92,3 +92,26 @@ Planner는 이 단계에선 호출 안 함.
 - `node v24.14.1`, `npm 11.12.1` ✅
 - `git 2.51.1.windows.1` ✅
 - 첫 빌드 시간 OK ✅
+
+---
+
+## M3 — "First Dimension" (카메라 줌 + 회전)
+
+선정 경로: 웹 Claude 추천. M1 "First Light" → M2 "First Interaction" → M3 "First Dimension" 서사 연결.
+
+목표: OrthographicCamera 줌(휠) + 회전 도입. PerspectiveCamera 전환 검토. "진짜 3D 우주" 감각 완성.
+
+범위 (예비, Plan 수립은 M3 착수 시):
+- 휠 줌인/아웃
+- Alt+드래그 또는 우클릭 드래그로 회전
+- 카메라 모드 전환 (Orthographic ↔ Perspective) 검토
+- 노드 크기 줌 레벨 따라 보정
+
+M3 진입 시 할 일:
+1. Gemini Pro 재자문 (PerspectiveCamera 전환 타이밍, 성능 영향)
+2. Planner 메타리뷰
+3. Plan 수립 → Step 3개 권장 (M2처럼)
+
+선행 조건:
+- 현재 bridge.ts 전량 재작성 방식 유지 OK (노드 10개 스케일)
+- diff 동기화는 M4로

@@ -76,10 +76,10 @@ function App() {
     // 4) DOM 마운트 + 렌더 루프 시작
     scene.mount(containerRef.current);
 
-    // 렌더 콜백: M2에서는 비워둠. 고빈도 상태(카메라 팬 등)는 Step 2에서 추가.
+    // 렌더 콜백: OrbitControls damping 은 매 프레임 update() 호출 필수.
+    // instanceMatrix는 bridge 동기화 시에만 needsUpdate=true가 되므로 여기서 안 건드림.
     scene.setRenderCallback(() => {
-      // instanceMatrix는 bridge 동기화 시에만 needsUpdate=true가 되므로,
-      // 여기서 매 프레임 갱신할 필요 없음. (성능: 불변 시 GPU 업로드 0회)
+      cameraControllerRef.current?.update();
     });
 
     // 5) 단방향 동기화 배선.

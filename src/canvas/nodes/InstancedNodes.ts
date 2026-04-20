@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { NodeBuffer } from "../../state/nodeBuffer";
+import { useCosmosStore } from "../../state/store";
 
 /**
  * InstancedNodes — 대용량 노드 렌더링 모듈 (M2: bridge 연동 버전)
@@ -21,6 +22,9 @@ import { NodeBuffer } from "../../state/nodeBuffer";
 export class InstancedNodes {
   private mesh: THREE.InstancedMesh;
   private capacity: number; // 최대 인스턴스 수 (생성자에서 고정)
+
+  // M4 Step 2: 선택 하이라이트 구독 해제 함수 (bindSelectionHighlight 가 반환).
+  private highlightUnsub: (() => void) | null = null;
 
   constructor(capacity: number = 1024) {
     // three.js InstancedMesh 개념:
@@ -85,6 +89,14 @@ export class InstancedNodes {
     // 실제로 그릴 인스턴스 수 (GPU 드로우콜이 이만큼 순회).
     // capacity가 아니라 renderCount로 설정해야 뒤에 남은 stale 데이터가 안 그려짐.
     this.mesh.count = renderCount;
+
+    // M4 Step 1 수정: Raycaster 는 InstancedMesh.boundingSphere 로 broad-phase 컬링을 한다.
+    //  - 이 sphere 는 모든 인스턴스 위치 + geometry 반지름을 감싼 구.
+    //  - 반드시 matrices 를 다 쓰고 count/needsUpdate 를 세팅한 "뒤"에 계산해야 한다.
+    //    그러지 않으면 (0,0,0) 주변의 작은 sphere 만 잡혀, 멀리 떨어진 노드 클릭 시
+    //    광선이 sphere 를 스치지 못해 intersects 가 항상 0 이 된다 (Gemini 자문).
+    //  - 비용은 O(count) 로 매우 작음 → 매 sync 마다 호출해도 무해.
+    this.mesh.computeBoundingSphere();
   }
 
   /**
@@ -94,6 +106,60 @@ export class InstancedNodes {
    */
   getMesh(): THREE.InstancedMesh {
     return this.mesh;
+  }
+
+  /**
+   * bindSelectionHighlight() — store.selectedNodeId 구독 → highlightMesh 이동/토글.
+   *
+   * M4 Step 2:
+   *   InstancedMesh 의 instanceColor/setColorAt 을 건드리지 않고, Scene 의 일반 Mesh
+   *   하나를 "선택된 노드 위치로 텔레포트"시키는 방식. GPU 재업로드 없음 → O(1) 비용.
+   *
+   * 의존성 주입:
+   *  - highlightMesh: Scene.getHighlightMesh() 결과물.
+   *  - buffer:        노드 좌표가 들어있는 NodeBuffer (bridge 가 동기화한 것).
+   *  - resolveIdToIndex: UUID → Buffer Index. 보통 bridge.getIdToIndex().get 을 람다로 감쌈.
+   *
+   * 구독 방식:
+   *  - subscribeWithSelector 미들웨어가 이미 store 에 붙어 있으므로
+   *    (state) => state.selectedNodeId 셀렉터로 "변경 시에만" 콜백 호출.
+   *  - 생성 직후 현재 상태로 1회 수동 동기화 (초기 null → visible=false 보장).
+   *
+   * 반환값: unsubscribe 함수. dispose() 에서 호출되어 메모리 누수 방지.
+   */
+  bindSelectionHighlight(
+    highlightMesh: THREE.Mesh,
+    buffer: NodeBuffer,
+    resolveIdToIndex: (id: string) => number | undefined
+  ): () => void {
+    const update = (selectedId: string | null): void => {
+      if (selectedId === null) {
+        highlightMesh.visible = false;
+        return;
+      }
+      const index = resolveIdToIndex(selectedId);
+      if (index === undefined || index < 0 || index >= buffer.count) {
+        // 알 수 없는 ID (bridge 동기화 이전 race 등) → 보수적으로 숨김.
+        highlightMesh.visible = false;
+        return;
+      }
+      const base = index * 3;
+      const x = buffer.positions[base];
+      const y = buffer.positions[base + 1];
+      const z = buffer.positions[base + 2];
+      highlightMesh.position.set(x, y, z);
+      highlightMesh.visible = true;
+    };
+
+    // 초기 동기화 (subscribe 는 "변경 시에만" 콜백 → 현재 상태 맞추려면 1회 수동 호출).
+    update(useCosmosStore.getState().selectedNodeId);
+
+    const unsub = useCosmosStore.subscribe(
+      (state) => state.selectedNodeId,
+      (id) => update(id)
+    );
+    this.highlightUnsub = unsub;
+    return unsub;
   }
 
   /**
@@ -118,6 +184,13 @@ export class InstancedNodes {
    * Geometry와 Material의 GPU 메모리 해제.
    */
   dispose(): void {
+    // M4 Step 2: 선택 구독 해제 (누수 방지).
+    //  store 가 여러 번 re-mount 되는 HMR 상황에서 unsub 을 빼먹으면
+    //  과거 InstancedNodes 가 계속 콜백을 받게 됨.
+    if (this.highlightUnsub) {
+      this.highlightUnsub();
+      this.highlightUnsub = null;
+    }
     (this.mesh.geometry as THREE.BufferGeometry).dispose();
     (this.mesh.material as THREE.Material).dispose();
   }

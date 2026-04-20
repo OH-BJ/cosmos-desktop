@@ -115,3 +115,37 @@ M3 진입 시 할 일:
 선행 조건:
 - 현재 bridge.ts 전량 재작성 방식 유지 OK (노드 10개 스케일)
 - diff 동기화는 M4로
+
+## M4 — "First Selection" (히트테스트 + 노드 선택)
+
+선정 경로: 웹 Claude 추천. M1 "First Light" → M2 "First Interaction" → M3 "First Dimension" → M4 "First Selection" 서사 연결.
+
+목표: 사용자가 노드를 클릭하면 해당 노드가 선택되고 시각 피드백(색/크기/테두리) 표시. 3D 공간에서 특정 대상에 "관심을 가진다"는 첫 단계.
+
+범위 (예비, Plan 수립은 M4 착수 시):
+- 마우스 클릭 이벤트 → 3D 공간의 노드 식별
+- 선택된 노드 ID를 Zustand store에 기록 (selectedNodeId)
+- InstancedMesh 특정 인스턴스에 시각 피드백
+- 선택 해제 (빈 공간 클릭)
+
+핵심 기술 결정 (M4 진입 시 Gemini에 자문할 것):
+- Raycaster (three.js 표준) vs GPU Color Picking
+  * Raycaster: 구현 간단, InstancedMesh 공식 지원, 느림
+  * GPU Picking: 빠름, 10k+ 노드 대응, 구현 복잡
+- PerspectiveCamera 좌표 변환은 Raycaster.setFromCamera로 자동
+
+선행 조건 (M3까지 완료됨):
+- PerspectiveCamera (M3) → Raycaster 표준 패턴 사용 가능
+- Log Depth Buffer (M3) → 깊이 판정 정확
+- 이중 아키텍처 (M2) → selectedNodeId 저빈도 업데이트에 최적
+
+M3 이후 미룬 것 (M5+):
+- Billboarding Shader (노드 크기 상수)
+- Rust IPC CRUD + UUID v7 (영속성)
+- 실제 FS 스캔 (notify crate)
+- diff 동기화 (bridge 최적화)
+
+M4 진입 시 할 일:
+1. Gemini Pro 재자문 (Raycaster vs GPU Picking, 성능)
+2. Planner 메타리뷰
+3. Plan 수립 → Step 3개 (M2/M3와 동일 리듬)

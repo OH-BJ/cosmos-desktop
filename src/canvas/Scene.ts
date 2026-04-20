@@ -26,6 +26,16 @@ export class Scene {
   private onRender: (() => void) | null = null;
   private resizeHandler: (() => void) | null = null; // C2 버그 수정: resize 리스너 참조 저장
 
+  /**
+   * 선택 하이라이트 메시 (M4 Step 2).
+   *  - 일반 Mesh 1개를 Scene 에 추가해 선택된 노드 위에 "덮어" 보여준다.
+   *  - InstancedMesh 의 setColorAt/instanceColor 를 건드리지 않아 매 클릭마다
+   *    1.2MB@10k 수준의 GPU 재업로드가 발생하지 않는다 (Gemini Pro 자문).
+   *  - 평소 visible=false, 선택 시 position 이동 + visible=true 토글.
+   *  - wireframe 으로 해두면 안쪽 노드가 보여서 어떤 인스턴스가 선택됐는지 명확.
+   */
+  private highlightMesh: THREE.Mesh;
+
   constructor() {
     // three.js의 Scene 개념: 렌더링할 모든 오브젝트(메시, 라이트, 카메라)를 담는 컨테이너
     this.scene = new THREE.Scene();
@@ -50,6 +60,19 @@ export class Scene {
     });
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+
+    // M4 Step 2: 선택 하이라이트 메시.
+    //  - 반지름 6.5 (노드 반지름 5 × 1.3) → 노드를 살짝 감싸는 느낌.
+    //  - MeshBasicMaterial(wireframe): 조명 계산 없이 선명한 색 + 격자로 시인성 ↑.
+    //  - depthTest=true 유지: Log Depth Buffer 와 상호작용해도 일반 Mesh 라 Z-test 정상.
+    const highlightGeo = new THREE.SphereGeometry(6.5, 16, 16);
+    const highlightMat = new THREE.MeshBasicMaterial({
+      color: 0xffcc00,
+      wireframe: true,
+    });
+    this.highlightMesh = new THREE.Mesh(highlightGeo, highlightMat);
+    this.highlightMesh.visible = false;
+    this.scene.add(this.highlightMesh);
   }
 
   /**
@@ -113,6 +136,14 @@ export class Scene {
     return this.renderer;
   }
 
+  /**
+   * getHighlightMesh() — 선택 하이라이트 메시 반환 (M4 Step 2).
+   * InstancedNodes.bindSelectionHighlight 에 주입해 selectedNodeId 구독과 연결.
+   */
+  getHighlightMesh(): THREE.Mesh {
+    return this.highlightMesh;
+  }
+
   setRenderCallback(callback: () => void): void {
     this.onRender = callback;
   }
@@ -133,6 +164,11 @@ export class Scene {
     }
 
     this.renderer.dispose();
+
+    // M4 Step 2: 하이라이트 메시 리소스 정리 (geometry/material GPU 메모리 해제).
+    // scene.remove 는 아래 루프에서 처리됨.
+    (this.highlightMesh.geometry as THREE.BufferGeometry).dispose();
+    (this.highlightMesh.material as THREE.Material).dispose();
 
     while (this.scene.children.length > 0) {
       this.scene.remove(this.scene.children[0]);

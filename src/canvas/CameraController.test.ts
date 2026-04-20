@@ -95,6 +95,18 @@ describe("CameraController", () => {
       removeEventListener: vi.fn((event: string, handler: Function) => {
         (dom._removed[event] ||= []).push(handler);
       }),
+      // M4: 히트테스트에서 NDC 변환에 canvas 좌상단 오프셋이 필요.
+      getBoundingClientRect: () => ({
+        left: 0,
+        top: 0,
+        right: 1000,
+        bottom: 1000,
+        width: 1000,
+        height: 1000,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
     };
     return dom;
   }
@@ -124,9 +136,9 @@ describe("CameraController", () => {
       const dom = createMockDom();
       new CameraController(cam, dom);
 
-      expect(dom._listeners["mousedown"]?.length).toBe(1);
-      expect(windowListeners["mousemove"]?.length).toBe(1);
-      expect(windowListeners["mouseup"]?.length).toBe(1);
+      expect(dom._listeners["pointerdown"]?.length).toBe(1);
+      expect(dom._listeners["pointermove"]?.length).toBe(1);
+      expect(dom._listeners["pointerup"]?.length).toBe(1);
     });
   });
 
@@ -136,7 +148,7 @@ describe("CameraController", () => {
       const dom = createMockDom();
       new CameraController(cam, dom);
 
-      const mousedown = dom._listeners["mousedown"][0];
+      const mousedown = dom._listeners["pointerdown"][0];
       mousedown({ button: 0, clientX: 100, clientY: 100 });
 
       expect(dom.style.cursor).toBe("grabbing");
@@ -147,7 +159,7 @@ describe("CameraController", () => {
       const dom = createMockDom();
       new CameraController(cam, dom);
 
-      const mousedown = dom._listeners["mousedown"][0];
+      const mousedown = dom._listeners["pointerdown"][0];
       mousedown({ button: 2, clientX: 100, clientY: 100 });
 
       expect(dom.style.cursor).toBe("grab");
@@ -158,8 +170,8 @@ describe("CameraController", () => {
       const dom = createMockDom();
       new CameraController(cam, dom);
 
-      const mousedown = dom._listeners["mousedown"][0];
-      const mousemove = windowListeners["mousemove"][0];
+      const mousedown = dom._listeners["pointerdown"][0];
+      const mousemove = dom._listeners["pointermove"][0];
 
       mousedown({ button: 0, clientX: 0, clientY: 0 });
 
@@ -184,8 +196,8 @@ describe("CameraController", () => {
       const dom = createMockDom();
       new CameraController(cam, dom);
 
-      const mousedown = dom._listeners["mousedown"][0];
-      const mousemove = windowListeners["mousemove"][0];
+      const mousedown = dom._listeners["pointerdown"][0];
+      const mousemove = dom._listeners["pointermove"][0];
 
       mousedown({ button: 0, clientX: 0, clientY: 0 });
       mousemove({ clientX: 100, clientY: 0 });
@@ -198,9 +210,9 @@ describe("CameraController", () => {
       const dom = createMockDom();
       new CameraController(cam, dom);
 
-      const mousedown = dom._listeners["mousedown"][0];
-      const mousemove = windowListeners["mousemove"][0];
-      const mouseup = windowListeners["mouseup"][0];
+      const mousedown = dom._listeners["pointerdown"][0];
+      const mousemove = dom._listeners["pointermove"][0];
+      const mouseup = dom._listeners["pointerup"][0];
 
       mousedown({ button: 0, clientX: 0, clientY: 0 });
       mouseup({ button: 0, clientX: 0, clientY: 0 });
@@ -216,7 +228,7 @@ describe("CameraController", () => {
       const dom = createMockDom();
       new CameraController(cam, dom);
 
-      const mousemove = windowListeners["mousemove"][0];
+      const mousemove = dom._listeners["pointermove"][0];
       const before = cam.position.clone();
       mousemove({ clientX: 500, clientY: 500 });
 
@@ -327,25 +339,193 @@ describe("CameraController", () => {
     });
   });
 
+  describe("클릭 선택 (M4 Step 1 — Raycaster 히트테스트)", () => {
+    /**
+     * mesh.raycast 를 오버라이드해 "히트 여부"를 테스트에서 제어한다.
+     * Raycaster.intersectObject 는 내부적으로 object.raycast(raycaster, intersects) 를
+     * 호출하므로, 실제 지오메트리를 준비하지 않고도 mock 흐름이 성립.
+     */
+    function createMockPickTarget(hit: { instanceId: number } | null) {
+      const mesh = new THREE.Object3D();
+      mesh.raycast = (_raycaster: any, intersects: any[]) => {
+        if (hit) {
+          intersects.push({
+            distance: 100,
+            point: new THREE.Vector3(),
+            object: mesh,
+            instanceId: hit.instanceId,
+          });
+        }
+      };
+      return mesh;
+    }
+
+    it("클릭(<5px) + 히트 → onPick 호출 with UUID", () => {
+      const onPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      const ctrl = new CameraController(cam, dom, { onPick });
+      ctrl.setPickTarget(createMockPickTarget({ instanceId: 1 }));
+      ctrl.setIndexToIdResolver(() => ["uuid-a", "uuid-b", "uuid-c"]);
+
+      const down = dom._listeners["pointerdown"][0];
+      const up = dom._listeners["pointerup"][0];
+
+      down({ button: 0, clientX: 500, clientY: 500 });
+      up({ button: 0, clientX: 502, clientY: 501 });
+
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenCalledWith("uuid-b");
+    });
+
+    it("드래그(>5px) → onPick 미호출 (팬 동작만)", () => {
+      const onPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      const ctrl = new CameraController(cam, dom, { onPick });
+      ctrl.setPickTarget(createMockPickTarget({ instanceId: 0 }));
+      ctrl.setIndexToIdResolver(() => ["uuid-a"]);
+
+      const down = dom._listeners["pointerdown"][0];
+      const up = dom._listeners["pointerup"][0];
+
+      down({ button: 0, clientX: 0, clientY: 0 });
+      up({ button: 0, clientX: 100, clientY: 0 });
+
+      expect(onPick).not.toHaveBeenCalled();
+    });
+
+    it("클릭 + hit 없음 → onPick(null) (빈 공간 클릭 = 선택 해제)", () => {
+      const onPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      const ctrl = new CameraController(cam, dom, { onPick });
+      ctrl.setPickTarget(createMockPickTarget(null));
+      ctrl.setIndexToIdResolver(() => ["uuid-a"]);
+
+      const down = dom._listeners["pointerdown"][0];
+      const up = dom._listeners["pointerup"][0];
+
+      down({ button: 0, clientX: 10, clientY: 10 });
+      up({ button: 0, clientX: 12, clientY: 11 });
+
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenCalledWith(null);
+    });
+
+    it("pickTarget 미설정 시에도 클릭 → onPick(null) 호출 (안전 경로)", () => {
+      const onPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      new CameraController(cam, dom, { onPick });
+
+      const down = dom._listeners["pointerdown"][0];
+      const up = dom._listeners["pointerup"][0];
+
+      down({ button: 0, clientX: 0, clientY: 0 });
+      up({ button: 0, clientX: 1, clientY: 0 });
+
+      expect(onPick).toHaveBeenCalledWith(null);
+    });
+
+    it("pointercancel → isDragging 해제, cursor='grab', onPick 미호출", () => {
+      const onPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      new CameraController(cam, dom, { onPick });
+
+      const down = dom._listeners["pointerdown"][0];
+      const cancel = dom._listeners["pointercancel"][0];
+
+      down({ button: 0, clientX: 100, clientY: 100, pointerId: 1 });
+      expect(dom.style.cursor).toBe("grabbing");
+
+      cancel({ pointerId: 1 });
+      expect(dom.style.cursor).toBe("grab");
+      expect(onPick).not.toHaveBeenCalled();
+    });
+
+    it("onPick 옵션 생략 시 클릭해도 에러 없음", () => {
+      const cam = createCamera();
+      const dom = createMockDom();
+      new CameraController(cam, dom);
+
+      const down = dom._listeners["pointerdown"][0];
+      const up = dom._listeners["pointerup"][0];
+
+      expect(() => {
+        down({ button: 0, clientX: 0, clientY: 0 });
+        up({ button: 0, clientX: 1, clientY: 0 });
+      }).not.toThrow();
+    });
+  });
+
+  describe("ESC 키 선택 해제 (M4 Step 3)", () => {
+    it("ESC 키다운 → onPick(null) 호출 (빈 공간 클릭과 동일 의미)", () => {
+      const onPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      new CameraController(cam, dom, { onPick });
+
+      // window 에 등록된 keydown 핸들러를 꺼내 직접 호출.
+      // (실제 브라우저에서는 document 전역 keydown 이 여기로 들어옴.)
+      const keydown = windowListeners["keydown"][0];
+      keydown({ key: "Escape" });
+
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenCalledWith(null);
+    });
+
+    it("ESC 이외 키(Enter, a 등) → onPick 미호출", () => {
+      const onPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      new CameraController(cam, dom, { onPick });
+
+      const keydown = windowListeners["keydown"][0];
+      keydown({ key: "Enter" });
+      keydown({ key: "a" });
+      keydown({ key: " " });
+
+      expect(onPick).not.toHaveBeenCalled();
+    });
+
+    it("dispose 후 ESC 키가 와도 onPick 미호출 (C2 회귀 방지)", () => {
+      const onPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      const ctrl = new CameraController(cam, dom, { onPick });
+
+      // dispose 전 등록된 핸들러 참조. 동일 참조로 removeEventListener 에
+      // 전달됐는지까지 확인해야 "실제로 제거됐다" 고 말할 수 있다.
+      const keydownRef = windowListeners["keydown"][0];
+
+      ctrl.dispose();
+
+      expect(windowRemoved["keydown"]?.[0]).toBe(keydownRef);
+      expect(onPick).not.toHaveBeenCalled();
+    });
+  });
+
   describe("dispose", () => {
     it("dispose 시 window 리스너 제거 + domElement 리스너(mousedown/wheel) 제거 + cursor 복원", () => {
       const cam = createCamera();
       const dom = createMockDom();
       const ctrl = new CameraController(cam, dom);
 
-      const mousedownRef = dom._listeners["mousedown"][0];
+      const mousedownRef = dom._listeners["pointerdown"][0];
       const wheelRef = dom._listeners["wheel"][0];
-      const mousemoveRef = windowListeners["mousemove"][0];
-      const mouseupRef = windowListeners["mouseup"][0];
+      const mousemoveRef = dom._listeners["pointermove"][0];
+      const mouseupRef = dom._listeners["pointerup"][0];
 
       const oc = orbitInstances[0];
 
       ctrl.dispose();
 
-      expect(dom._removed["mousedown"]?.[0]).toBe(mousedownRef);
+      expect(dom._removed["pointerdown"]?.[0]).toBe(mousedownRef);
       expect(dom._removed["wheel"]?.[0]).toBe(wheelRef);
-      expect(windowRemoved["mousemove"]?.[0]).toBe(mousemoveRef);
-      expect(windowRemoved["mouseup"]?.[0]).toBe(mouseupRef);
+      expect(dom._removed["pointermove"]?.[0]).toBe(mousemoveRef);
+      expect(dom._removed["pointerup"]?.[0]).toBe(mouseupRef);
       expect(oc.dispose).toHaveBeenCalledTimes(1);
 
       expect(dom.style.cursor).toBe("");

@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import * as THREE from "three";
 import { InstancedNodes } from "./InstancedNodes";
 import { allocateNodeBuffer, pushNode } from "../../state/nodeBuffer";
+import { useCosmosStore } from "../../state/store";
 
 /**
  * InstancedNodes 단위 테스트 (M2 재작성)
@@ -110,6 +111,111 @@ describe("InstancedNodes", () => {
     it("리소스 정리 (에러 없음)", () => {
       const nodes = new InstancedNodes(4);
       expect(() => nodes.dispose()).not.toThrow();
+    });
+  });
+
+  /**
+   * M4 Step 2: bindSelectionHighlight 테스트.
+   *
+   * 검증 포인트:
+   *  - selectedNodeId=유효 id → highlightMesh.visible=true + position 일치
+   *  - selectedNodeId=null → visible=false
+   *  - 연속해서 다른 id 선택 → position 갱신
+   *  - dispose 이후에는 store 변경이 highlightMesh 를 건드리지 않음 (unsub)
+   *
+   * store 는 모듈 스코프 전역이라 테스트 사이 격리를 위해 afterEach 에서 null 로 리셋.
+   */
+  describe("bindSelectionHighlight", () => {
+    afterEach(() => {
+      useCosmosStore.getState().selectNode(null);
+    });
+
+    /**
+     * 테스트용 헬퍼: 버퍼 3개 노드 + InstancedNodes + highlightMesh + resolver 한 번에 준비.
+     * id 는 bridge 실제 매핑과 무관하게 Map 으로 주입 (bridge 모킹 없이 단위 격리).
+     */
+    const setup = () => {
+      const nodes = new InstancedNodes(8);
+      const buffer = allocateNodeBuffer(8);
+      pushNode(buffer, 10, 20, 30); // idx 0
+      pushNode(buffer, -5, 0, 7); // idx 1
+      pushNode(buffer, 100, -50, 0); // idx 2
+      nodes.syncFromBuffer(buffer);
+
+      const idToIndex = new Map<string, number>([
+        ["id-a", 0],
+        ["id-b", 1],
+        ["id-c", 2],
+      ]);
+      const resolver = (id: string) => idToIndex.get(id);
+
+      // highlightMesh 는 Scene 없이도 THREE.Mesh 단독으로 생성 가능.
+      const highlightMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(6.5, 8, 8),
+        new THREE.MeshBasicMaterial({ wireframe: true })
+      );
+      highlightMesh.visible = false;
+
+      return { nodes, buffer, highlightMesh, resolver };
+    };
+
+    it("선택 시 visible=true + position 이 해당 노드 좌표와 일치", () => {
+      const { nodes, buffer, highlightMesh, resolver } = setup();
+      nodes.bindSelectionHighlight(highlightMesh, buffer, resolver);
+
+      useCosmosStore.getState().selectNode("id-a");
+
+      expect(highlightMesh.visible).toBe(true);
+      expect(highlightMesh.position.x).toBeCloseTo(10);
+      expect(highlightMesh.position.y).toBeCloseTo(20);
+      expect(highlightMesh.position.z).toBeCloseTo(30);
+
+      nodes.dispose();
+    });
+
+    it("선택 해제(null) 시 visible=false", () => {
+      const { nodes, buffer, highlightMesh, resolver } = setup();
+      nodes.bindSelectionHighlight(highlightMesh, buffer, resolver);
+
+      useCosmosStore.getState().selectNode("id-b");
+      expect(highlightMesh.visible).toBe(true);
+
+      useCosmosStore.getState().selectNode(null);
+      expect(highlightMesh.visible).toBe(false);
+
+      nodes.dispose();
+    });
+
+    it("연속해서 다른 노드 선택 시 position 이 갱신됨", () => {
+      const { nodes, buffer, highlightMesh, resolver } = setup();
+      nodes.bindSelectionHighlight(highlightMesh, buffer, resolver);
+
+      useCosmosStore.getState().selectNode("id-a");
+      expect(highlightMesh.position.x).toBeCloseTo(10);
+
+      useCosmosStore.getState().selectNode("id-c");
+      expect(highlightMesh.position.x).toBeCloseTo(100);
+      expect(highlightMesh.position.y).toBeCloseTo(-50);
+      expect(highlightMesh.position.z).toBeCloseTo(0);
+      expect(highlightMesh.visible).toBe(true);
+
+      nodes.dispose();
+    });
+
+    it("dispose 이후에는 store 변경이 highlightMesh 를 건드리지 않음 (unsub 누수 방지)", () => {
+      const { nodes, buffer, highlightMesh, resolver } = setup();
+      nodes.bindSelectionHighlight(highlightMesh, buffer, resolver);
+
+      useCosmosStore.getState().selectNode("id-a");
+      const before = highlightMesh.position.clone();
+
+      nodes.dispose();
+
+      // dispose 후 다른 노드 선택해도 과거 메시 position 은 바뀌면 안 됨.
+      useCosmosStore.getState().selectNode("id-c");
+      expect(highlightMesh.position.x).toBeCloseTo(before.x);
+      expect(highlightMesh.position.y).toBeCloseTo(before.y);
+      expect(highlightMesh.position.z).toBeCloseTo(before.z);
     });
   });
 });

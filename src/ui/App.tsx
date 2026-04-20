@@ -4,7 +4,7 @@ import { InstancedNodes } from "../canvas/nodes/InstancedNodes";
 import { CameraController } from "../canvas/CameraController";
 import { useCosmosStore } from "../state/store";
 import { allocateNodeBuffer, NodeBuffer } from "../state/nodeBuffer";
-import { setupStoreSynchronization } from "../state/bridge";
+import { setupStoreSynchronization, getIndexToId, getIdToIndex } from "../state/bridge";
 import "./App.css";
 
 /**
@@ -93,9 +93,29 @@ function App() {
     // 6) 카메라 팬 컨트롤러 장착 (Step 2 — First Interaction).
     //    이벤트를 canvas DOM(renderer.domElement) 에 바인딩해야 UI 패널 클릭과
     //    충돌하지 않는다. scene.mount 이후여야 renderer 가 DOM 에 붙어 있음.
+    // M4 Step 1: onPick 콜백에서 store 의 selectNode 액션을 호출.
+    //   CameraController 는 React/Zustand 와 무관하게 "hit 결과 UUID" 만 알면 되고,
+    //   store 갱신 책임은 App 계층이 갖는다 (의존성 역전).
+    //   useCosmosStore.getState() 로 매번 최신 액션을 조회 — subscribe 로 훅을 쓰면
+    //   렌더 루프 밖이라 React 경고가 날 수 있어 getState() 가 안전.
     cameraControllerRef.current = new CameraController(
       scene.getCamera(),
-      scene.getRenderer().domElement
+      scene.getRenderer().domElement,
+      {
+        onPick: (id) => useCosmosStore.getState().selectNode(id),
+      }
+    );
+    // 히트테스트 대상(InstancedMesh) + Buffer Index → UUID 역매핑 주입.
+    cameraControllerRef.current.setPickTarget(instancedNodes.getMesh());
+    cameraControllerRef.current.setIndexToIdResolver(getIndexToId);
+
+    // M4 Step 2: 선택 하이라이트 메시 구독 연결.
+    //  selectedNodeId 변화 시 Scene 의 highlightMesh 가 해당 노드 위치로 이동 + visible 토글.
+    //  resolver 는 bridge 의 idToIndex Map 조회로 구현 (O(1)).
+    instancedNodes.bindSelectionHighlight(
+      scene.getHighlightMesh(),
+      buffer,
+      (id) => getIdToIndex().get(id)
     );
 
     // Cleanup: React unmount 시 리소스 해제 (순서 역순)
@@ -122,15 +142,6 @@ function App() {
     };
   }, []);
 
-  /**
-   * 선택 상태 변화 로그 (M2+ 하이라이트에서 실제 사용 예정)
-   */
-  useEffect(() => {
-    if (selectedNodeId) {
-      console.log(`[App] Selected node: ${selectedNodeId}`);
-    }
-  }, [selectedNodeId]);
-
   return (
     <div className="app-root">
       {/* three.js canvas가 이 div 안에 마운트됨 */}
@@ -140,7 +151,7 @@ function App() {
       <div className="ui-panel">
         <p>Cosmos Desktop — M2 다중 노드 렌더</p>
         <p>
-          노드 {nodes.length}개 | 선택: {selectedNodeId || "없음"}
+          노드 {nodes.length}개 | 선택: {selectedNodeId ? selectedNodeId.slice(0, 8) : "없음"}
         </p>
       </div>
     </div>

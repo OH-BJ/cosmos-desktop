@@ -140,10 +140,14 @@ M3 진입 시 할 일:
 - 이중 아키텍처 (M2) → selectedNodeId 저빈도 업데이트에 최적
 
 M3 이후 미룬 것 (M5+):
-- Billboarding Shader (노드 크기 상수)
+- 호버링 + GPU Color Picking (Gemini Pro: "조만간 필수")
 - Rust IPC CRUD + UUID v7 (영속성)
+- 메타데이터 패널
 - 실제 FS 스캔 (notify crate)
+- Billboarding Shader (노드 크기 상수)
 - diff 동기화 (bridge 최적화)
+
+→ 확정: 메타데이터 패널 방향으로 M5 진입. see docs/PLAN_M5.md
 
 M4 진입 시 할 일:
 1. Gemini Pro 재자문 (Raycaster vs GPU Picking, 성능)

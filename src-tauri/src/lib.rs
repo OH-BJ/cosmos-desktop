@@ -7,8 +7,52 @@ mod db;
 mod ipc_types;
 mod safety;
 
+use tauri_specta::{collect_commands, Builder};
+
+/// tauri-specta Builder 생성 (런타임/빌드 양쪽에서 공통 사용)
+///
+/// 왜 함수로 분리했는가:
+/// - `run()` (앱 실행)에서는 `invoke_handler()`로 IPC 등록에 사용
+/// - 테스트(`export_bindings`)에서는 동일 Builder로 `bindings.ts` 생성
+/// - 두 호출이 똑같은 command 목록을 보장 (drift 방지)
+///
+/// `collect_commands!` 매크로:
+/// - 인자로 받은 함수들의 specta 메타정보를 수집
+/// - 각 함수에는 `#[tauri::command] + #[specta::specta]`가 필수
+/// - 빠뜨리면 frontend bindings에서 해당 함수 누락
+fn build_specta() -> Builder<tauri::Wry> {
+    Builder::<tauri::Wry>::new().commands(collect_commands![
+        commands::nodes::get_nodes,
+        commands::node_details::get_node_details,
+    ])
+}
+
+/// `gen_bindings` 바이너리에서만 호출하는 공개 wrapper.
+/// 실제 외부 사용은 금지 (이름의 `__internal_` prefix가 의도를 표현).
+/// 이렇게 분리한 이유는 lib 밖(별도 bin)에서 동일 Builder 정의를 재사용해
+/// command 목록의 drift를 방지하면서, lib 자체는 prviate API만 노출하려 함.
+#[doc(hidden)]
+pub fn __internal_build_specta_for_codegen() -> Builder<tauri::Wry> {
+    build_specta()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let specta_builder = build_specta();
+
+    // 디버그 빌드(=`tauri dev` 또는 `cargo build`)에서만 bindings.ts 갱신.
+    // 릴리스 빌드에서는 frontend bundle이 이미 컴파일된 상태이므로 무의미하다.
+    // 경로는 `src-tauri/` 기준 상대 경로 → 프로젝트 루트의 `src/lib/bindings.ts`.
+    #[cfg(debug_assertions)]
+    {
+        use specta_typescript::Typescript;
+        if let Err(e) = specta_builder
+            .export(Typescript::default(), "../src/lib/bindings.ts")
+        {
+            eprintln!("[tauri-specta] bindings.ts 생성 실패: {}", e);
+        }
+    }
+
     tauri::Builder::default()
         // tauri-plugin-sql 초기화
         // - SQLite 드라이버 자동 로드
@@ -22,11 +66,10 @@ pub fn run() {
         // tauri-plugin-opener 유지 (파일 열기, URL 열기 등)
         .plugin(tauri_plugin_opener::init())
         // IPC 핸들러 등록
-        // tauri::generate_handler![] 매크로가 자동으로 #[tauri::command] 함수들을 등록
-        // 함수 추가 시 여기에도 추가 필수
-        .invoke_handler(tauri::generate_handler![
-            commands::nodes::get_nodes
-        ])
+        // tauri-specta Builder의 invoke_handler()가 collect_commands!에 등록된
+        // 함수들을 자동으로 묶어서 반환. tauri::generate_handler! 매크로 호출이
+        // 더 이상 필요 없다 (drift 위험 제거).
+        .invoke_handler(specta_builder.invoke_handler())
         .run(tauri::generate_context!())
         // expect() 대신 명시적 에러 처리로 변경
         //
@@ -47,3 +90,11 @@ pub fn run() {
         })
         .ok(); // Result를 버림 (에러는 이미 eprintln!으로 처리했으므로)
 }
+
+// NOTE (M5 Step 1): bindings.ts 자동 export 테스트를 lib.rs에 두려 했으나,
+// Windows에서 lib 테스트 exe가 STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)로
+// 실패하는 이슈를 확인했다 (tauri-specta + tauri 2.10 + WebView2 DLL 체인 충돌
+// 추정 — webview2-com-sys 다중 버전 빌드).
+// → 자동 export는 `pub fn run()`의 디버그 빌드 경로에 의존하기로 결정.
+//   개발자가 `cargo tauri dev`를 한 번 실행하면 ../src/lib/bindings.ts가 갱신된다.
+//   향후 build.rs 또는 xtask로 분리해 cargo test 없이도 갱신되게 만드는 것은 M6+ 과제.

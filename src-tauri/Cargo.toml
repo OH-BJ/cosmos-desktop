@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "무한 줌 3D 우주 캔버스 파일 탐색기"
 authors = ["cosmos-desktop contributors"]
 edition = "2021"
+# 기본 실행 바이너리 명시. src/bin/gen_bindings.rs 추가(M5 Step 1) 이후
+# `cargo run` / `tauri dev` 가 어느 바이너리를 실행할지 모호해져 빌드가 실패한다.
+# gen_bindings 는 별도 바이너리이므로 `cargo run --bin gen_bindings` 로 명시 호출.
+default-run = "cosmos-desktop"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -28,4 +32,11 @@ serde_json = "1"
 thiserror = "1"
 # 비동기 런타임: Tauri 내부에도 포함되지만 명시적으로 depend
 tokio = { version = "1", features = ["full"] }
+# 타입 세이프 IPC: Rust 타입/커맨드를 TypeScript bindings로 자동 생성
+# (M5 Step 1) Gemini Pro 권장. specta는 Rust 타입을 다른 언어로 export하는 코어,
+# specta-typescript는 TS export 백엔드, tauri-specta는 #[tauri::command]를 묶어서
+# 타입 세이프 클라이언트 함수를 함께 생성. 2026-04 현재 v2.0.0-rc.24가 최신 stable.
+specta = "=2.0.0-rc.24"
+specta-typescript = "0.0.11"
+tauri-specta = { version = "=2.0.0-rc.24", features = ["derive", "typescript"] }
 

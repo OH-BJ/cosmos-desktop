@@ -34,6 +34,7 @@ use crate::ipc_types::Node;
 /// Rust의 Result<T, E> 패턴: 예외 던지기 대신 반환값에 성공/실패 담기.
 /// 호출자(Tauri)는 자동으로 Result를 JSON 성공/실패 응답으로 변환.
 #[tauri::command]
+#[specta::specta]
 pub async fn get_nodes() -> Result<Vec<Node>, String> {
     // TODO: DB에서 모든 노드 SELECT (다음 마일스톤)
     // - tauri-plugin-sql의 execute() 또는 query()로 SELECT 실행

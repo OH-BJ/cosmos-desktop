@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
+import type { NodeDetails } from "../lib/bindings";
 
 /**
  * Node — 논리 노드 타입 (Zustand 저빈도 상태용)
@@ -69,6 +70,13 @@ interface CosmosStore {
   // 선택된 노드 ID
   selectedNodeId: string | null;
   selectNode: (id: string | null) => void;
+
+  // M5: 선택된 노드의 메타데이터 (Rust IPC `get_node_details` 응답).
+  // null인 경우 = 미선택 또는 IPC 응답 대기 중 또는 조회 실패.
+  // selectedNodeId 변경 시 nodeDetailsSync 모듈이 비동기로 채워준다.
+  // (옵션 α — 단일 필드. 캐시는 Step3 이후 필요해지면 도입)
+  selectedNodeDetails: NodeDetails | null;
+  setSelectedNodeDetails: (details: NodeDetails | null) => void;
 }
 
 /**
@@ -89,4 +97,8 @@ export const useCosmosStore = create<CosmosStore>()(subscribeWithSelector((set) 
 
   selectedNodeId: null,
   selectNode: (id: string | null) => set({ selectedNodeId: id }),
+
+  selectedNodeDetails: null,
+  setSelectedNodeDetails: (details: NodeDetails | null) =>
+    set({ selectedNodeDetails: details }),
 })));

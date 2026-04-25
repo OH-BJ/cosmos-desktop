@@ -5,6 +5,8 @@ import { CameraController } from "../canvas/CameraController";
 import { useCosmosStore } from "../state/store";
 import { allocateNodeBuffer, NodeBuffer } from "../state/nodeBuffer";
 import { setupStoreSynchronization, getIndexToId, getIdToIndex } from "../state/bridge";
+import { setupNodeDetailsSync } from "../state/nodeDetailsSync";
+import { NodeDetailsPanel } from "./NodeDetailsPanel";
 import "./App.css";
 
 /**
@@ -35,6 +37,8 @@ function App() {
   // 렌더링은 three.js가 담당 (이 훅은 React 리렌더 트리거만).
   const nodes = useCosmosStore((state) => state.nodes);
   const selectedNodeId = useCosmosStore((state) => state.selectedNodeId);
+  // M5: 선택된 노드 메타데이터 (nodeDetailsSync 가 비동기 채움). 미선택/대기 중엔 null.
+  const selectedNodeDetails = useCosmosStore((state) => state.selectedNodeDetails);
 
   /**
    * useEffect: 초기화 (마운트 시 한 번만 실행)
@@ -142,6 +146,20 @@ function App() {
     };
   }, []);
 
+  /**
+   * M5: 선택 → 메타데이터 IPC 동기화 useEffect.
+   *
+   * Scene/Buffer 라이프사이클과 무관하므로 별도 useEffect로 분리.
+   *  - mount 시 setupNodeDetailsSync 1회 호출 (내부에서 초기 상태 동기화 + subscribe).
+   *  - unmount 시 반환된 unsub 호출 (StrictMode 더블 마운트 안전).
+   */
+  useEffect(() => {
+    const unsub = setupNodeDetailsSync();
+    return () => {
+      unsub();
+    };
+  }, []);
+
   return (
     <div className="app-root">
       {/* three.js canvas가 이 div 안에 마운트됨 */}
@@ -154,6 +172,9 @@ function App() {
           노드 {nodes.length}개 | 선택: {selectedNodeId ? selectedNodeId.slice(0, 8) : "없음"}
         </p>
       </div>
+
+      {/* M5: 우측 상단 — 선택된 노드 메타데이터 (details === null 이면 자동 숨김) */}
+      <NodeDetailsPanel details={selectedNodeDetails} />
     </div>
   );
 }

@@ -153,3 +153,22 @@ M4 진입 시 할 일:
 1. Gemini Pro 재자문 (Raycaster vs GPU Picking, 성능)
 2. Planner 메타리뷰
 3. Plan 수립 → Step 3개 (M2/M3와 동일 리듬)
+
+---
+
+## M6 "First Grounding" — 실제 FS 스캔 + 청크 스트리밍
+
+→ 확정: Read-Only FS 스캔 + 워커 스레드 + 청크 IPC. see docs/PLAN_M6.md.
+
+분해: M6-1 (Backend) / M6-2 (Frontend).
+
+5번째 AI 교차검증 사이클(웹 Claude → Gemini Pro → Planner 메타리뷰). Gemini가 후보 A/B/C 외 옵션 D(B 변형 + Binary IPC 인프라 통합) 제시. 핵심 통찰: 단순 스캔이 아닌 "데이터 섭취 파이프라인" 구축.
+
+### M7+ 미룸
+- `notify` crate FS Watcher
+- SQLite 영속성
+- CRUD (create/update/delete)
+- 호버링 + GPU Color Picking
+- Binary IPC (`Vec<u8>`) — 측정 기반
+- Billboarding Shader
+- bridge diff 동기화

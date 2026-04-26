@@ -39,4 +39,14 @@ tokio = { version = "1", features = ["full"] }
 specta = "=2.0.0-rc.24"
 specta-typescript = "0.0.11"
 tauri-specta = { version = "=2.0.0-rc.24", features = ["derive", "typescript"] }
+# (M6-1 Step 1) FS 스캐너 의존성
+# - dirs: OS 별 홈 디렉토리 경로 처리 (Windows %USERPROFILE%, macOS/Linux $HOME)
+# - uuid v7: 시간 기반 정렬 가능한 ID. Step 2 청크 스트리밍에서 노드 식별자로 사용.
+#   v7은 "절반 timestamp + 절반 random" 구조라, 청크 도착 순서대로 자연 정렬됨.
+dirs = "5"
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+# 격리된 임시 디렉토리/파일 생성 (테스트 종료 시 자동 cleanup)
+tempfile = "3"
 

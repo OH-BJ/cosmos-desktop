@@ -4,6 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
+// (M6-1 Step 2) Event derive: tauri-specta가 Event 트레이트 구현을 자동 생성하면
+// `chunk.emit(&app)` 호출과 frontend `events.nodeChunkEvent.listen(...)` wrapper가 함께 만들어진다.
+use tauri_specta::Event;
 
 /// 3D 공간 노드 (파일, 링크, 메모 등의 개체)
 ///
@@ -79,6 +82,79 @@ pub struct NodeDetails {
     pub size_bytes: u64,
     pub created_at: i64,
     pub modified_at: i64,
+}
+
+// ---------------------------------------------------------------------------
+// M6 — 디스크 스캔 결과 노드 (First Grounding)
+// ---------------------------------------------------------------------------
+
+/// 비동기 디렉토리 스캐너가 만들어내는 1개 노드.
+///
+/// 기존 `Node` (3D 좌표 보유) / `NodeDetails` (메타패널 전용) 와는 분리한다:
+/// - `Node`: 렌더링 좌표 중심. 3D 위치가 핵심 필드.
+/// - `NodeDetails`: 단일 노드 상세 패널. 타임스탬프 등 풍부한 메타.
+/// - `ScannedNode`: 대량 스트리밍 페이로드. **Step 1에선 좌표 없음** —
+///   Step 2(JSON 청크) 또는 Frontend 단계에서 임시 random 좌표를 부여.
+///
+/// 굳이 합치지 않은 이유: 청크 페이로드 크기를 줄이려면 불필요한 필드를
+/// 빼야 하고, 향후 `Node`가 view 전용 / `ScannedNode`가 disk 전용으로
+/// 책임 분리를 유지하는 편이 명확하다.
+///
+/// # 필드 결정 근거
+/// - `id: String` — UUID v7 (시간 정렬 가능). 청크 순서 보장 부담 완화.
+/// - `path: String` — 절대 경로. canonicalize 결과를 그대로 직렬화.
+/// - `name: String` — `path` 끝 segment. frontend가 매번 split 하지 않게 미리 분리.
+/// - `kind: NodeKind` — 기존 enum 재사용 (File/Directory/Link/Memo).
+/// - `size_bytes: u64` — `Node`와 동일 근거 (JS Number 53-bit 안전).
+/// - `depth: u32` — root 기준 깊이. root 직계 자식 = 1, 그 손자 = 2.
+///   향후 시각 카드(M7+)에서 깊이 → 우주 거리 매핑 알고리즘에 활용.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ScannedNode {
+    pub id: String,
+    pub path: String,
+    pub name: String,
+    pub kind: NodeKind,
+    pub size_bytes: u64,
+    pub depth: u32,
+}
+
+// ---------------------------------------------------------------------------
+// M6-1 Step 2 — 청크 스트리밍 이벤트
+// ---------------------------------------------------------------------------
+
+/// 디렉토리 스캐너가 emit 하는 청크 이벤트 페이로드.
+///
+/// # 흐름
+/// 1. Frontend: `invoke('start_directory_scan', {path, maxDepth})`
+/// 2. Rust: 즉시 `Ok(())` 반환 + `tokio::spawn`으로 백그라운드 스캔 시작
+/// 3. Rust: 1,000개 노드 모일 때마다 `chunk.emit(&app)` 호출
+/// 4. Frontend: `events.nodeChunkEvent.listen((c) => ...)` 로 점진 수신
+/// 5. 마지막 청크는 `is_last = true` (남은 노드 수와 무관, 빈 배열일 수도 있음)
+///
+/// # 필드 결정
+/// - `chunk_id: u32` — 0부터 증가하는 순번. Frontend가 순서 검증/재정렬 용도로 사용.
+///   (현재는 단일 task가 직렬 emit 하므로 순서 보장되지만, 멀티 task 분할 가능성 대비.)
+/// - `nodes: Vec<ScannedNode>` — 이 청크의 페이로드. 최대 `CHUNK_SIZE` (기본 1,000).
+/// - `is_last: bool` — 종료 신호. Frontend가 "스캔 완료" UI 표시.
+/// - `total_scanned: u32` — 누적 노드 수 (이 청크 포함). Progress 표시용.
+///
+/// # tauri_specta::Event derive
+/// 이 derive로 자동 생성되는 것:
+/// - Rust측: `NodeChunkEvent::emit(&self, &AppHandle)` 메서드
+/// - 이벤트 이름: 구조체명 → kebab-case (`"node-chunk-event"`)
+/// - bindings.ts: `events.nodeChunkEvent.listen(handler)` wrapper
+///
+/// # 왜 NodeChunk가 아닌 NodeChunkEvent인가
+/// 일반 데이터 타입 (`Node`, `ScannedNode`)과 이벤트 페이로드를 명명으로 구분.
+/// 향후 `ScanProgressEvent`, `ScanErrorEvent` 등 추가 시 일관된 패턴.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeChunkEvent {
+    pub chunk_id: u32,
+    pub nodes: Vec<ScannedNode>,
+    pub is_last: bool,
+    pub total_scanned: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +276,72 @@ mod tests {
         assert!(json_str.contains("\"modifiedAt\""), "modifiedAt (camelCase) 필요");
         // snake_case 형태로는 직렬화되면 안 됨
         assert!(!json_str.contains("size_bytes"), "snake_case로 새지 않아야 함");
+    }
+
+    /// ScannedNode JSON에 camelCase 필드 (`sizeBytes`)와 모든 필드가
+    /// 누락 없이 직렬화되는지 확인. M6-1 Step 2 청크 IPC의 페이로드 형식 회귀 방지.
+    #[test]
+    fn test_scanned_node_json_camelcase() {
+        let n = ScannedNode {
+            id: "01900000-0000-7000-8000-000000000099".into(),
+            path: "/Users/demo/sub/leaf.txt".into(),
+            name: "leaf.txt".into(),
+            kind: NodeKind::File,
+            size_bytes: 1234,
+            depth: 2,
+        };
+        let json = serde_json::to_string(&n).expect("ScannedNode 직렬화 실패");
+        assert!(json.contains("\"sizeBytes\""), "sizeBytes (camelCase) 필요");
+        assert!(json.contains("\"depth\""), "depth 필드 포함");
+        assert!(json.contains("\"kind\":\"file\""), "kind는 enum camelCase");
+        assert!(!json.contains("size_bytes"), "snake_case 새지 않아야 함");
+
+        // round-trip
+        let back: ScannedNode = serde_json::from_str(&json).expect("역직렬화 실패");
+        assert_eq!(back, n, "round-trip 후 동일");
+    }
+
+    /// NodeChunkEvent — camelCase 변환 + round-trip + 빈 청크 case 검증.
+    /// Step 2 청크 IPC payload 형식 회귀 방지.
+    #[test]
+    fn test_node_chunk_event_camelcase_roundtrip() {
+        let chunk = NodeChunkEvent {
+            chunk_id: 7,
+            nodes: vec![ScannedNode {
+                id: "01900000-0000-7000-8000-000000000123".into(),
+                path: "/x/y.txt".into(),
+                name: "y.txt".into(),
+                kind: NodeKind::File,
+                size_bytes: 42,
+                depth: 1,
+            }],
+            is_last: true,
+            total_scanned: 1500,
+        };
+
+        let json = serde_json::to_string(&chunk).expect("NodeChunkEvent 직렬화");
+        assert!(json.contains("\"chunkId\""), "chunkId (camelCase)");
+        assert!(json.contains("\"isLast\""), "isLast (camelCase)");
+        assert!(json.contains("\"totalScanned\""), "totalScanned (camelCase)");
+        assert!(!json.contains("chunk_id"), "snake_case 새지 않음");
+        assert!(!json.contains("is_last"), "snake_case 새지 않음");
+
+        let back: NodeChunkEvent = serde_json::from_str(&json).expect("역직렬화");
+        assert_eq!(back, chunk, "round-trip 동일");
+    }
+
+    /// 빈 청크 (종료 시그널) 직렬화 가능
+    #[test]
+    fn test_node_chunk_event_empty_terminal() {
+        let terminal = NodeChunkEvent {
+            chunk_id: 0,
+            nodes: vec![],
+            is_last: true,
+            total_scanned: 0,
+        };
+        let json = serde_json::to_string(&terminal).expect("빈 청크 직렬화");
+        assert!(json.contains("\"nodes\":[]"), "빈 nodes 배열");
+        assert!(json.contains("\"isLast\":true"));
     }
 
     /// NodeKind 각 variant가 camelCase로 직렬화되는지 확인

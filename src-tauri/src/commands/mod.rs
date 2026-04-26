@@ -3,3 +3,5 @@
 
 pub mod node_details;
 pub mod nodes;
+// (M6-1 Step 1) 디렉토리 스캐너 IPC entry
+pub mod scanner;

@@ -6,8 +6,10 @@ mod commands;
 mod db;
 mod ipc_types;
 mod safety;
+// (M6-1 Step 1) tokio 비동기 디렉토리 스캐너 코어
+mod scanner;
 
-use tauri_specta::{collect_commands, Builder};
+use tauri_specta::{collect_commands, collect_events, Builder};
 
 /// tauri-specta Builder 생성 (런타임/빌드 양쪽에서 공통 사용)
 ///
@@ -21,10 +23,18 @@ use tauri_specta::{collect_commands, Builder};
 /// - 각 함수에는 `#[tauri::command] + #[specta::specta]`가 필수
 /// - 빠뜨리면 frontend bindings에서 해당 함수 누락
 fn build_specta() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new().commands(collect_commands![
-        commands::nodes::get_nodes,
-        commands::node_details::get_node_details,
-    ])
+    Builder::<tauri::Wry>::new()
+        .commands(collect_commands![
+            commands::nodes::get_nodes,
+            commands::node_details::get_node_details,
+            // (M6-1 Step 1) 비스트리밍 스캔. 작은 디렉토리/디버그용으로 유지.
+            commands::scanner::scan_directory_command,
+            // (M6-1 Step 2) 청크 스트리밍 스캔. 운영 entry.
+            commands::scanner::start_directory_scan,
+        ])
+        // (M6-1 Step 2) Event 등록. derive(tauri_specta::Event) 가 만든 Event impl 을
+        // collect_events! 가 수집해 frontend `events.nodeChunkEvent.listen()` wrapper 생성.
+        .events(collect_events![ipc_types::NodeChunkEvent])
 }
 
 /// `gen_bindings` 바이너리에서만 호출하는 공개 wrapper.
@@ -70,6 +80,15 @@ pub fn run() {
         // 함수들을 자동으로 묶어서 반환. tauri::generate_handler! 매크로 호출이
         // 더 이상 필요 없다 (drift 위험 제거).
         .invoke_handler(specta_builder.invoke_handler())
+        // (M6-1 Step 2) Event 시스템 마운트.
+        // collect_events! 로 등록한 NodeChunkEvent 의 emit/listen 채널이 실제로
+        // 작동하려면 App 인스턴스에 mount 가 필요하다. setup hook 안에서 호출.
+        // specta_builder 를 setup 클로저로 move (`invoke_handler` 가 &self 라
+        // 위에서 builder 가 소비되지 않음).
+        .setup(move |app| {
+            specta_builder.mount_events(app);
+            Ok(())
+        })
         .run(tauri::generate_context!())
         // expect() 대신 명시적 에러 처리로 변경
         //

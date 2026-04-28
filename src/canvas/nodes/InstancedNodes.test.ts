@@ -98,6 +98,114 @@ describe("InstancedNodes", () => {
     });
   });
 
+  /**
+   * M6-2 Step 2: 부분 업데이트 (addUpdateRange) 테스트.
+   *
+   * 검증 포인트:
+   *  - startIndex 미지정 → updateRanges 비어있음 (전체 업로드 모드).
+   *  - startIndex > 0 → updateRanges 에 신규 range 1 개 등록 (단위: typed array index).
+   *  - 신규 영역 instanceMatrix 가 정확히 갱신됨.
+   *  - 이전 영역 instanceMatrix 는 건드리지 않음 (점진 append 보장).
+   *  - startIndex == renderCount (변화 없음) → updateRanges 비어있음 (no-op partial).
+   *
+   * three.js r169 의 BufferAttribute API:
+   *  - updateRanges: Array<{ start, count }> (둘 다 typed array index).
+   *  - addUpdateRange(start, count): updateRanges.push.
+   *  - clearUpdateRanges(): updateRanges.length = 0.
+   *
+   * Mat4 itemSize=16 → 인스턴스 i 는 underlying Float32Array 에서 [i*16, i*16+16).
+   */
+  describe("syncFromBuffer 부분 업데이트 (M6-2 Step 2)", () => {
+    it("startIndex 미지정 → updateRanges 비어있음 (full upload)", () => {
+      const nodes = new InstancedNodes(8);
+      const buffer = allocateNodeBuffer(8);
+      pushNode(buffer, 1, 1, 1);
+      pushNode(buffer, 2, 2, 2);
+
+      nodes.syncFromBuffer(buffer);
+
+      const attr = nodes.getMesh().instanceMatrix;
+      // updateRanges 가 비어있으면 WebGLAttributes 는 전체 bufferSubData 수행 — 의도된 동작.
+      // (needsUpdate 는 setter-only 라 read 시 undefined → version 증가로 검증.)
+      expect(attr.updateRanges.length).toBe(0);
+      expect(attr.version).toBeGreaterThan(0);
+    });
+
+    it("startIndex > 0 → updateRanges 에 신규 range 만 등록 (typed array index 단위)", () => {
+      const nodes = new InstancedNodes(8);
+      const buffer = allocateNodeBuffer(8);
+      // 1차: 2개 채우고 전체 업로드.
+      pushNode(buffer, 1, 1, 1);
+      pushNode(buffer, 2, 2, 2);
+      nodes.syncFromBuffer(buffer);
+
+      // 2차: 3개 추가하고 startIndex=2 로 부분 업로드.
+      pushNode(buffer, 3, 3, 3);
+      pushNode(buffer, 4, 4, 4);
+      pushNode(buffer, 5, 5, 5);
+      nodes.syncFromBuffer(buffer, { startIndex: 2 });
+
+      const attr = nodes.getMesh().instanceMatrix;
+      // 정확히 1 개의 range, [2*16, 3*16) — 인스턴스 [2,5) → 3 개분.
+      expect(attr.updateRanges.length).toBe(1);
+      expect(attr.updateRanges[0]).toEqual({ start: 2 * 16, count: 3 * 16 });
+      // needsUpdate 는 setter-only — version 이 두 번째 sync 후 추가 증가했는지로 검증.
+      expect(attr.version).toBeGreaterThanOrEqual(2);
+      expect(nodes.getCount()).toBe(5);
+    });
+
+    it("부분 업로드 후 신규 영역 instanceMatrix 가 정확히 갱신됨", () => {
+      const nodes = new InstancedNodes(8);
+      const buffer = allocateNodeBuffer(8);
+      pushNode(buffer, 1, 1, 1);
+      nodes.syncFromBuffer(buffer);
+
+      pushNode(buffer, 7, 8, 9);
+      nodes.syncFromBuffer(buffer, { startIndex: 1 });
+
+      const m = new THREE.Matrix4();
+      nodes.getMesh().getMatrixAt(1, m);
+      const p = new THREE.Vector3().setFromMatrixPosition(m);
+      expect(p.x).toBeCloseTo(7);
+      expect(p.y).toBeCloseTo(8);
+      expect(p.z).toBeCloseTo(9);
+    });
+
+    it("연속 부분 업로드 → 매 호출마다 updateRanges 가 신규 range 로 교체됨", () => {
+      const nodes = new InstancedNodes(8);
+      const buffer = allocateNodeBuffer(8);
+      pushNode(buffer, 1, 1, 1);
+      nodes.syncFromBuffer(buffer);
+
+      // append 1 → partial
+      pushNode(buffer, 2, 2, 2);
+      nodes.syncFromBuffer(buffer, { startIndex: 1 });
+      // append 1 더 → 또 partial. 이전 range 가 누적되면 안 됨 (clearUpdateRanges 동작 검증).
+      pushNode(buffer, 3, 3, 3);
+      nodes.syncFromBuffer(buffer, { startIndex: 2 });
+
+      const attr = nodes.getMesh().instanceMatrix;
+      expect(attr.updateRanges.length).toBe(1);
+      expect(attr.updateRanges[0]).toEqual({ start: 2 * 16, count: 1 * 16 });
+    });
+
+    it("startIndex >= renderCount (변화 없음) → updateRanges 비어있음 (no-op)", () => {
+      const nodes = new InstancedNodes(8);
+      const buffer = allocateNodeBuffer(8);
+      pushNode(buffer, 1, 1, 1);
+      pushNode(buffer, 2, 2, 2);
+
+      // 초기 전체 업로드 후 startIndex 를 count 와 동일하게 → 추가 노드 없음.
+      nodes.syncFromBuffer(buffer);
+      nodes.syncFromBuffer(buffer, { startIndex: 2 });
+
+      const attr = nodes.getMesh().instanceMatrix;
+      // (renderCount > startIndex) 조건 False → addUpdateRange 호출 안 됨.
+      expect(attr.updateRanges.length).toBe(0);
+      expect(nodes.getCount()).toBe(2);
+    });
+  });
+
   describe("getMesh", () => {
     it("three.js InstancedMesh 객체 반환", () => {
       const nodes = new InstancedNodes(4);

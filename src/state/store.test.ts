@@ -38,3 +38,68 @@ describe("CosmosStore.selectedNodeDetails", () => {
     expect(useCosmosStore.getState().selectedNodeDetails).toBeNull();
   });
 });
+
+/**
+ * M6-2 Step 3: scanProgress 슬라이스 테스트.
+ *
+ * 검증 포인트:
+ *  - 초기값: isScanning=false, totalScanned=0, lastChunkId=null.
+ *  - startScan: isScanning=true, 카운트 0 으로 초기화.
+ *  - updateScanProgress: 청크 도착마다 totalScanned/lastChunkId 갱신, isLast=true 면
+ *    isScanning=false 로 자동 전환.
+ *  - resetScanProgress: 모든 값 초기 상태로 복귀 (실패/취소 복구용).
+ */
+describe("CosmosStore.scanProgress", () => {
+  beforeEach(() => {
+    useCosmosStore.getState().resetScanProgress();
+  });
+
+  it("초기값: isScanning=false, totalScanned=0, lastChunkId=null", () => {
+    const p = useCosmosStore.getState().scanProgress;
+    expect(p.isScanning).toBe(false);
+    expect(p.totalScanned).toBe(0);
+    expect(p.lastChunkId).toBeNull();
+  });
+
+  it("startScan → isScanning=true 로 전환, 카운트 0 초기화", () => {
+    // 일단 진행 상태에서 시작
+    useCosmosStore.getState().updateScanProgress(7, 1234, false);
+    useCosmosStore.getState().startScan();
+
+    const p = useCosmosStore.getState().scanProgress;
+    expect(p.isScanning).toBe(true);
+    expect(p.totalScanned).toBe(0);
+    expect(p.lastChunkId).toBeNull();
+  });
+
+  it("updateScanProgress(isLast=false) → 카운트만 갱신, isScanning 유지", () => {
+    useCosmosStore.getState().startScan();
+    useCosmosStore.getState().updateScanProgress(0, 1000, false);
+    useCosmosStore.getState().updateScanProgress(1, 2000, false);
+
+    const p = useCosmosStore.getState().scanProgress;
+    expect(p.isScanning).toBe(true);
+    expect(p.totalScanned).toBe(2000);
+    expect(p.lastChunkId).toBe(1);
+  });
+
+  it("updateScanProgress(isLast=true) → isScanning=false 자동 전환", () => {
+    useCosmosStore.getState().startScan();
+    useCosmosStore.getState().updateScanProgress(2, 3000, true);
+
+    const p = useCosmosStore.getState().scanProgress;
+    expect(p.isScanning).toBe(false);
+    expect(p.totalScanned).toBe(3000);
+    expect(p.lastChunkId).toBe(2);
+  });
+
+  it("resetScanProgress → 모든 필드 초기 상태", () => {
+    useCosmosStore.getState().updateScanProgress(5, 9999, false);
+    useCosmosStore.getState().resetScanProgress();
+
+    const p = useCosmosStore.getState().scanProgress;
+    expect(p.isScanning).toBe(false);
+    expect(p.totalScanned).toBe(0);
+    expect(p.lastChunkId).toBeNull();
+  });
+});

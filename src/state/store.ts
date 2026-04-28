@@ -62,6 +62,22 @@ const INITIAL_TEST_NODES: Node[] = [
  * 주의: 렌더 루프에서 store.getState()를 호출하지 말 것.
  * 고빈도는 항상 TypedArray만 읽고, 필요시 이벤트로 Zustand와 동기화.
  */
+/**
+ * ScanProgress — 디렉토리 스캔 진행 상태 (M6-2 Step 3).
+ *
+ * 좌상단 정보 박스 + ScanControl 패널이 공유하는 단일 출처. 청크 도착마다
+ * App 의 onAfterChunk 에서 updateScanProgress 가 호출된다.
+ *
+ * @property isScanning ack 후 isLast=true 청크 도착 전까지 true.
+ * @property totalScanned 누적 청크 노드 수 (하드코딩 3개는 미포함).
+ * @property lastChunkId 마지막 도착 청크의 chunk_id (없으면 null).
+ */
+export interface ScanProgress {
+  isScanning: boolean;
+  totalScanned: number;
+  lastChunkId: number | null;
+}
+
 interface CosmosStore {
   // 노드 목록 (Rust에서 받은 초기 로드 + IPC 업데이트)
   nodes: Node[];
@@ -77,6 +93,16 @@ interface CosmosStore {
   // (옵션 α — 단일 필드. 캐시는 Step3 이후 필요해지면 도입)
   selectedNodeDetails: NodeDetails | null;
   setSelectedNodeDetails: (details: NodeDetails | null) => void;
+
+  // M6-2 Step 3: 스캔 진행 상태. 좌상단 카운트 + ScanControl 진행 표시 공유.
+  scanProgress: ScanProgress;
+  // 새 스캔 시작 — isScanning=true, 누적 카운트는 그대로 유지 X (β: 청크 리셋과 함께
+  // 호출되므로 0 으로 초기화). 호출 측에서 clearChunkedNodes 와 짝.
+  startScan: () => void;
+  // 청크 1개 도착 후 카운트/마지막 chunkId 반영. isLast=true 면 isScanning=false.
+  updateScanProgress: (chunkId: number, totalScanned: number, isLast: boolean) => void;
+  // 안전한 재초기화 (테스트/이상 종료 복구용).
+  resetScanProgress: () => void;
 }
 
 /**
@@ -101,4 +127,23 @@ export const useCosmosStore = create<CosmosStore>()(subscribeWithSelector((set) 
   selectedNodeDetails: null,
   setSelectedNodeDetails: (details: NodeDetails | null) =>
     set({ selectedNodeDetails: details }),
+
+  // 초기값: 미스캔 상태.
+  scanProgress: { isScanning: false, totalScanned: 0, lastChunkId: null },
+  startScan: () =>
+    set({
+      scanProgress: { isScanning: true, totalScanned: 0, lastChunkId: null },
+    }),
+  updateScanProgress: (chunkId, totalScanned, isLast) =>
+    set({
+      scanProgress: {
+        isScanning: !isLast,
+        totalScanned,
+        lastChunkId: chunkId,
+      },
+    }),
+  resetScanProgress: () =>
+    set({
+      scanProgress: { isScanning: false, totalScanned: 0, lastChunkId: null },
+    }),
 })));

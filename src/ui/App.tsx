@@ -78,6 +78,15 @@ function App() {
       return;
     }
 
+    // (fix m6-2) 이 effect 인스턴스 전용 cancelled 플래그.
+    //   React 19 StrictMode 더블 마운트에서 Promise 1 (Mount 1 의 setupNodeChunkSync)
+    //   이 Mount 2 가 시작된 뒤에 resolve 하는 레이스가 발생.
+    //   기존 sceneRef.current === null 가드는 Mount 2 가 sceneRef 를 다시 채워서
+    //   무력화 → listener 1, 2 둘 다 살아남아 청크가 2번 처리됨.
+    //   클로저 플래그는 effect 인스턴스마다 독립이라 Mount 1 cleanup 이 자기
+    //   자신의 cancelled 만 true 로 만들 수 있다 (Mount 2 에 영향 X).
+    let cancelled = false;
+
     // 1) Scene
     const scene = new Scene();
     sceneRef.current = scene;
@@ -162,9 +171,13 @@ function App() {
       },
     })
       .then((unsub) => {
-        // 마운트가 이미 unmount 된 경우 — Promise 가 cleanup 보다 늦게 resolve 했을 때.
-        // sceneRef 가 null 이면 cleanup 이 끝났다는 뜻이라 즉시 unsub.
-        if (sceneRef.current === null) {
+        // (fix m6-2) cancelled 플래그가 1차 방어선 — 이 effect 인스턴스의 cleanup
+        //   이 이미 호출됐으면 listener 를 즉시 떼어낸다. StrictMode 더블 마운트
+        //   레이스에서도 클로저 독립성 덕분에 Mount 1 의 cancelled 는 Mount 1 의
+        //   .then 만 차단한다.
+        // sceneRef.current === null 가드는 방어적 이중장치로 보존 — 향후 effect
+        //   외부에서 dispose 가 일어나는 등 예외 경로에서도 listener 누수 방지.
+        if (cancelled || sceneRef.current === null) {
           unsub();
           return;
         }
@@ -204,6 +217,11 @@ function App() {
 
     // Cleanup: React unmount 시 리소스 해제 (순서 역순)
     return () => {
+      // (fix m6-2) Promise pending 인 setupNodeChunkSync 가 있으면 늦게 resolve
+      //   되더라도 자기 listener 를 즉시 떼어내도록 신호. chunkUnsubRef 는 아직
+      //   null 일 수 있어서 ref 체크만으로는 부족 — 클로저 플래그가 진짜 차단 장치.
+      cancelled = true;
+
       // 가장 먼저 구독 해제 (이후 store 변경이 죽은 참조를 건드리지 않도록)
       if (unsubRef.current) {
         unsubRef.current();

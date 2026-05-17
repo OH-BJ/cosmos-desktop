@@ -227,7 +227,9 @@ export type NodeKind = "file" | "directory" | "link" | "memo";
  *  - `kind: NodeKind` — 기존 enum 재사용 (File/Directory/Link/Memo).
  *  - `size_bytes: u64` — `Node`와 동일 근거 (JS Number 53-bit 안전).
  *  - `depth: u32` — root 기준 깊이. root 직계 자식 = 1, 그 손자 = 2.
- *    향후 시각 카드(M7+)에서 깊이 → 우주 거리 매핑 알고리즘에 활용.
+ *  - `position: [f32; 3]` — (M7-1 Step 1) Fractal Orbital Packing 으로 계산된
+ *    3D 우주 좌표. Frontend 가 더 이상 random 폴백을 만들지 않고 그대로 사용.
+ *    `f32` 인 이유: GPU 인스턴스 매트릭스가 `Float32Array` 라 어차피 다운캐스트됨.
  */
 export type ScannedNode = {
 	id: string,
@@ -236,6 +238,7 @@ export type ScannedNode = {
 	kind: NodeKind,
 	sizeBytes: number,
 	depth: number,
+	position: [number, number, number],
 };
 
 /* Tauri Specta runtime */

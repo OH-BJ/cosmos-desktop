@@ -215,6 +215,56 @@ describe("InstancedNodes", () => {
     });
   });
 
+  /**
+   * M7-1 Step 2: Size Attenuation / uniform 관리 테스트.
+   *
+   * 검증 포인트:
+   *  - 초기 uniforms 기본값 (uMinPixelSize=4, uBaseRadius=5)
+   *  - constructor options.resolution 이 uResolution 에 전달됨
+   *  - setResolution(w, h) 호출 시 uResolution.value 가 동기 갱신됨
+   *  - material 이 onBeforeCompile 패치를 가진 MeshBasicMaterial
+   *
+   * jsdom 환경에서는 WebGL 이 없어 onBeforeCompile 이 실제로 호출되지 않으므로,
+   * 외부 보유 uniforms 객체로 검증한다 (이게 InstancedNodes 가 자체 보유하는 이유).
+   */
+  describe("size attenuation uniforms (M7-1 Step 2)", () => {
+    it("기본 uniform 값: uMinPixelSize=4, uBaseRadius=500, uResolution=(1,1)", () => {
+      // BASE_RADIUS 는 100K 거리 스케일 대응으로 500. 시각 검증 결과 5.0 은 항상 4px
+      // 클램프만 발동해 거리감 표현 불가. 후속 depth-aware scale 도입 전까지 500 고정.
+      const nodes = new InstancedNodes(4);
+      const u = nodes.getUniforms();
+      expect(u.uMinPixelSize.value).toBeCloseTo(4.0);
+      expect(u.uBaseRadius.value).toBeCloseTo(500.0);
+      expect(u.uResolution.value.x).toBeCloseTo(1);
+      expect(u.uResolution.value.y).toBeCloseTo(1);
+    });
+
+    it("constructor options.resolution 이 uResolution 에 반영됨", () => {
+      const nodes = new InstancedNodes(4, { resolution: [1920, 1080] });
+      const u = nodes.getUniforms();
+      expect(u.uResolution.value.x).toBeCloseTo(1920);
+      expect(u.uResolution.value.y).toBeCloseTo(1080);
+    });
+
+    it("setResolution(w, h) 호출 시 uResolution.value 가 동기 갱신됨", () => {
+      const nodes = new InstancedNodes(4, { resolution: [800, 600] });
+      const u = nodes.getUniforms();
+      // resize 시 Scene.handleResize → setResolution 경유.
+      nodes.setResolution(1280, 720);
+      expect(u.uResolution.value.x).toBeCloseTo(1280);
+      expect(u.uResolution.value.y).toBeCloseTo(720);
+    });
+
+    it("material 이 MeshBasicMaterial + onBeforeCompile 패치를 가짐", () => {
+      const nodes = new InstancedNodes(4);
+      const mat = nodes.getMesh().material as THREE.MeshBasicMaterial;
+      expect(mat.constructor.name).toBe("MeshBasicMaterial");
+      // onBeforeCompile 함수가 등록됐는지만 검증 — jsdom 에서는 호출되지 않음.
+      expect(typeof mat.onBeforeCompile).toBe("function");
+      expect(typeof mat.customProgramCacheKey).toBe("function");
+    });
+  });
+
   describe("dispose", () => {
     it("리소스 정리 (에러 없음)", () => {
       const nodes = new InstancedNodes(4);

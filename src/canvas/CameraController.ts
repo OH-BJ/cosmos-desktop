@@ -6,8 +6,12 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
  *  - MIN_ZOOM_Z: 너무 가까이 가면 노드 안쪽/뒤로 들어가 시야 깨짐.
  *  - MAX_ZOOM_Z: 너무 멀면 노드가 점으로 사라짐.
  */
-const MIN_ZOOM_Z = 50;
-const MAX_ZOOM_Z = 5000;
+// (M7-1 hotfix) Fractal Orbital Packing 거리 스케일에 맞춘 줌 범위.
+//   MIN_ZOOM_Z=0.1 — D5 (≈10) 보다 더 가까이 가서 개별 파일 검사 가능.
+//   MAX_ZOOM_Z=1e6 — D1 (100K) 별자리 군집을 멀리서 조망 가능. logarithmicDepthBuffer
+//   덕분에 1e7 배수 차이도 z-fighting 없이 안전.
+const MIN_ZOOM_Z = 0.1;
+const MAX_ZOOM_Z = 1_000_000;
 /**
  * 휠 한 눈금당 줌 배율. 지수적 스케일을 쓰는 이유:
  *  - 현재 z에 비례해서 z가 변하면 "같은 휠 동작=같은 체감 줌"이 된다.

@@ -270,30 +270,32 @@ describe("CameraController", () => {
       expect(ev.preventDefault).toHaveBeenCalledTimes(1);
     });
 
-    it("clamp min: 줌인 과도 시 z는 50 이하로 안 내려감", () => {
+    it("clamp min: 줌인 과도 시 z는 0.1 이하로 안 내려감", () => {
+      // (M7-1 hotfix) MIN_ZOOM_Z 50 → 0.1 (D5 노드 ≈10 까지 들어가게).
       const cam = createCamera();
-      cam.position.z = 60; // 거의 최소치
+      cam.position.z = 0.12; // 거의 최소치
       const dom = createMockDom();
       new CameraController(cam, dom);
 
       const onWheel = dom._listeners["wheel"][0];
-      // 매우 큰 음수 deltaY: 1.1^(-1000/100)=1.1^-10 ≈ 0.386 → 60 * 0.386 = 23.16 → clamp 50
+      // 큰 음수 deltaY: 1.1^-10 ≈ 0.386 → 0.12 * 0.386 ≈ 0.046 → clamp 0.1
       onWheel(wheelEvent(-1000));
 
-      expect(cam.position.z).toBe(50);
+      expect(cam.position.z).toBe(0.1);
     });
 
-    it("clamp max: 줌아웃 과도 시 z는 5000 초과 안 함", () => {
+    it("clamp max: 줌아웃 과도 시 z는 1,000,000 초과 안 함", () => {
+      // (M7-1 hotfix) MAX_ZOOM_Z 5000 → 1e6 (D1 별자리 100K 조망 가능).
       const cam = createCamera();
-      cam.position.z = 4800;
+      cam.position.z = 900_000;
       const dom = createMockDom();
       new CameraController(cam, dom);
 
       const onWheel = dom._listeners["wheel"][0];
-      // 매우 큰 양수 deltaY: 1.1^10 ≈ 2.59 → 4800 * 2.59 > 5000 → clamp 5000
+      // 큰 양수 deltaY: 1.1^10 ≈ 2.59 → 900K * 2.59 > 1e6 → clamp 1e6
       onWheel(wheelEvent(1000));
 
-      expect(cam.position.z).toBe(5000);
+      expect(cam.position.z).toBe(1_000_000);
     });
   });
 

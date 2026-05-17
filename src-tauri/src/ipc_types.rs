@@ -107,7 +107,9 @@ pub struct NodeDetails {
 /// - `kind: NodeKind` — 기존 enum 재사용 (File/Directory/Link/Memo).
 /// - `size_bytes: u64` — `Node`와 동일 근거 (JS Number 53-bit 안전).
 /// - `depth: u32` — root 기준 깊이. root 직계 자식 = 1, 그 손자 = 2.
-///   향후 시각 카드(M7+)에서 깊이 → 우주 거리 매핑 알고리즘에 활용.
+/// - `position: [f32; 3]` — (M7-1 Step 1) Fractal Orbital Packing 으로 계산된
+///   3D 우주 좌표. Frontend 가 더 이상 random 폴백을 만들지 않고 그대로 사용.
+///   `f32` 인 이유: GPU 인스턴스 매트릭스가 `Float32Array` 라 어차피 다운캐스트됨.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ScannedNode {
@@ -117,6 +119,7 @@ pub struct ScannedNode {
     pub kind: NodeKind,
     pub size_bytes: u64,
     pub depth: u32,
+    pub position: [f32; 3],
 }
 
 // ---------------------------------------------------------------------------
@@ -289,10 +292,12 @@ mod tests {
             kind: NodeKind::File,
             size_bytes: 1234,
             depth: 2,
+            position: [1.5, -2.5, 3.5],
         };
         let json = serde_json::to_string(&n).expect("ScannedNode 직렬화 실패");
         assert!(json.contains("\"sizeBytes\""), "sizeBytes (camelCase) 필요");
         assert!(json.contains("\"depth\""), "depth 필드 포함");
+        assert!(json.contains("\"position\""), "position 필드 포함");
         assert!(json.contains("\"kind\":\"file\""), "kind는 enum camelCase");
         assert!(!json.contains("size_bytes"), "snake_case 새지 않아야 함");
 
@@ -314,6 +319,7 @@ mod tests {
                 kind: NodeKind::File,
                 size_bytes: 42,
                 depth: 1,
+                position: [0.0, 0.0, 0.0],
             }],
             is_last: true,
             total_scanned: 1500,

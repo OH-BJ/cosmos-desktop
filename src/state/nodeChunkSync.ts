@@ -16,8 +16,9 @@ import { appendChunkedNode } from "./bridge";
  * 설계 결정:
  *  - Zustand 우회: 청크가 수천 개 들어와도 React 리렌더 없음. 고빈도 레이어
  *    (NodeBuffer + bridge 매핑) 만 갱신. UI 카운터(노드 N개)는 하드코딩 3 그대로.
- *  - 좌표 생성: ScannedNode 에는 x/y/z 가 없음 (Backend 가 우주 좌표를 안 줌).
- *    Frontend 에서 임시 random 으로 채움. 의미 있는 클러스터링 알고리즘은 M7+.
+ *  - **(M7-1 Step 1) 좌표는 Rust 가 결정**: 더 이상 Frontend 에서 random 폴백을
+ *    만들지 않는다. ScannedNode.position = [x, y, z] 가 Fractal Orbital Packing
+ *    으로 계산된 결정성 있는 우주 좌표. 이 모듈은 그대로 buffer 에 기록.
  *  - 청크 순서: Rust 가 단일 task 로 직렬 emit 하므로 chunk_id 가 0,1,2,... 단조
  *    증가해야 정상. 어긋나면 경고만 — 처리 자체는 도착 순서대로 (append-only).
  */
@@ -25,31 +26,16 @@ import { appendChunkedNode } from "./bridge";
 /**
  * NodeChunkSyncOptions — listener 의존성 주입.
  *
- * @property randomCoord 좌표 생성 함수. 테스트에서 결정론적 시퀀스 주입 가능.
- *   기본값은 -500..500 균일 분포 (Orthographic ±960 화면 안쪽에 분산).
  * @property onAfterChunk 청크 처리 직후 호출. InstancedMesh.syncFromBuffer 트리거 용도.
  */
 export interface NodeChunkSyncOptions {
-  randomCoord?: () => number;
   onAfterChunk?: (chunk: NodeChunkEvent) => void;
-}
-
-/**
- * defaultRandomCoord — -500..500 균일 분포 1D 좌표.
- *
- * Math.random() 은 [0, 1) 이므로 (Math.random() - 0.5) * 1000 → [-500, 500).
- * Math.random 직접 호출이라 호출 시점마다 다른 값 → 단위 테스트에서는 randomCoord 주입 권장.
- */
-function defaultRandomCoord(): number {
-  return (Math.random() - 0.5) * 1000;
 }
 
 /**
  * processNodeChunk() — 단일 청크 처리 (pure, 테스트 가능).
  *
- * 청크 내부 노드를 순회하며:
- *  1) randomCoord() x 3 으로 (x, y, z) 생성
- *  2) appendChunkedNode 로 buffer + bridge 매핑에 1개씩 push
+ * 청크 내부 노드를 순회하며 ScannedNode.position 을 그대로 buffer + bridge 매핑에 push.
  *
  * 후속 InstancedMesh 갱신은 호출자(setupNodeChunkSync 의 onAfterChunk)가 담당.
  * 이 함수가 직접 InstancedNodes 를 모르도록 격리 → 단위 테스트에서 three.js 불필요.
@@ -58,18 +44,12 @@ function defaultRandomCoord(): number {
  */
 export function processNodeChunk(
   chunk: NodeChunkEvent,
-  buffer: NodeBuffer,
-  randomCoord: () => number = defaultRandomCoord
+  buffer: NodeBuffer
 ): number {
   let appended = 0;
   for (const node of chunk.nodes) {
-    const idx = appendChunkedNode(
-      buffer,
-      node.id,
-      randomCoord(),
-      randomCoord(),
-      randomCoord()
-    );
+    const [x, y, z] = node.position;
+    const idx = appendChunkedNode(buffer, node.id, x, y, z);
     if (idx >= 0) appended++;
   }
   return appended;
@@ -87,14 +67,14 @@ export function processNodeChunk(
  *  3) onAfterChunk(chunk) → InstancedMesh 갱신
  *
  * @param buffer 노드 좌표를 채울 NodeBuffer (App 이 allocate 한 인스턴스).
- * @param options randomCoord 주입 + onAfterChunk 후속 훅.
+ * @param options onAfterChunk 후속 훅.
  * @returns Promise<unsubscribe>. await 후 cleanup 에서 호출.
  */
 export async function setupNodeChunkSync(
   buffer: NodeBuffer,
   options: NodeChunkSyncOptions = {}
 ): Promise<UnlistenFn> {
-  const { randomCoord, onAfterChunk } = options;
+  const { onAfterChunk } = options;
   // chunk_id 순서 추적. -1 로 시작 → 첫 정상 청크는 0 이어야 함.
   let lastChunkId = -1;
 
@@ -110,7 +90,7 @@ export async function setupNodeChunkSync(
     }
     lastChunkId = chunk.chunkId;
 
-    processNodeChunk(chunk, buffer, randomCoord);
+    processNodeChunk(chunk, buffer);
     onAfterChunk?.(chunk);
   });
 

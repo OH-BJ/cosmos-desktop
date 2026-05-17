@@ -25,6 +25,9 @@ export class Scene {
   private animationId: number | null = null;
   private onRender: (() => void) | null = null;
   private resizeHandler: (() => void) | null = null; // C2 버그 수정: resize 리스너 참조 저장
+  // M7-1 Step 2: resize 시점 추가 알림 (InstancedNodes 의 uResolution uniform 갱신용).
+  //   Scene 이 InstancedNodes 를 직접 알지 않도록 콜백으로 약결합 — App 이 배선 책임.
+  private onResize: ((width: number, height: number) => void) | null = null;
 
   /**
    * 선택 하이라이트 메시 (M4 Step 2).
@@ -44,8 +47,15 @@ export class Scene {
     // PerspectiveCamera: 거리에 따라 물체 크기가 달라짐 (3D 원근감).
     // (fov, aspect, near, far). fov는 수직 FOV(°).
     const aspect = window.innerWidth / window.innerHeight;
-    this.camera = new THREE.PerspectiveCamera(50, aspect, 0.1, 10000);
-    this.camera.position.set(0, 0, 500); // z축 뒤로 물러나서 xy 평면을 바라봄
+    // (M7-1 hotfix) far plane 1e6 — Fractal Orbital Packing 의 D1=100K 를 받치고
+    //   D5 (≈10) 까지 z-fighting 없이 표현. logarithmicDepthBuffer=true 라 큰 범위
+    //   안전. 초기 position.z=300,000 → D1 노드(반경 100K)가 시야 안에 들어옴.
+    this.camera = new THREE.PerspectiveCamera(50, aspect, 0.1, 1_000_000);
+    // position.z=270_000 (M7-1 Step 2 시각 검증 2차 조정).
+    //   FOV=50° 에서 가시 반경 ≈ z*tan(25°) → 270K 면 ≈126K 로 D1 구면(100K)이
+    //   시야 수직의 약 80% 를 차지. 150K 는 D1 일부가 시야 밖으로 잘려 "거의 안 보임",
+    //   300K 는 다 보이지만 70% 만 차지해 "살짝 멀어 보임" 문제 → 270K 가 sweet spot.
+    this.camera.position.set(0, 0, 270_000);
     this.camera.lookAt(0, 0, 0);
     this.scene.add(this.camera);
 
@@ -102,6 +112,22 @@ export class Scene {
     this.camera.updateProjectionMatrix();
 
     this.renderer.setSize(w, h);
+
+    // M7-1 Step 2: 외부 구독자에게 새 해상도 전달 (예: InstancedNodes.setResolution).
+    //   카메라 aspect / renderer size 갱신 이후에 호출 — uniform 도 다음 프레임에 동일 값을 쓰도록.
+    if (this.onResize) {
+      this.onResize(w, h);
+    }
+  }
+
+  /**
+   * setResizeCallback() — resize 알림 등록 (M7-1 Step 2).
+   *
+   * InstancedNodes.setResolution 같은 viewport-의존 uniform 갱신을 위해
+   * Scene 에 직접 의존시키지 않고 App 이 콜백을 주입한다.
+   */
+  setResizeCallback(callback: (width: number, height: number) => void): void {
+    this.onResize = callback;
   }
 
   /**

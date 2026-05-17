@@ -14,9 +14,13 @@
 // - `canonicalize()` 기반 visited set: 심볼릭 링크 / Windows junction cycle 차단
 // - per-entry try/catch: 권한 거부된 폴더가 있어도 전체 실패하지 않고 건너뜀
 
+// (M7-1 Step 1) Fractal Orbital Packing 좌표 계산 모듈
+pub mod coords;
+
 use crate::ipc_types::{NodeChunkEvent, NodeKind, ScannedNode};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::time::SystemTime;
 use thiserror::Error;
 use tokio::fs;
 
@@ -89,10 +93,12 @@ where
     let mut visited: HashSet<PathBuf> = HashSet::new();
     visited.insert(canonical_root.clone());
 
-    let mut queue: VecDeque<(PathBuf, u32)> = VecDeque::new();
-    queue.push_back((canonical_root, 0));
+    // (M7-1 Step 1) BFS 큐 항목에 부모 좌표 추가.
+    // root 의 위치는 절대 원점 (0, 0, 0). 자식들은 child_position 으로 계산된 값.
+    let mut queue: VecDeque<(PathBuf, u32, [f32; 3])> = VecDeque::new();
+    queue.push_back((canonical_root, 0, [0.0_f32, 0.0, 0.0]));
 
-    while let Some((dir, parent_depth)) = queue.pop_front() {
+    while let Some((dir, parent_depth, parent_pos)) = queue.pop_front() {
         let child_depth = parent_depth + 1;
         if child_depth > max_depth {
             continue;
@@ -104,6 +110,19 @@ where
             Err(_) => continue,
         };
 
+        // (M7-1 Step 1) 좌표 결정성을 위해 entries 를 먼저 모은다.
+        // sibling_index 가 안정적이려면 정렬 키가 필요하기 때문.
+        // 정렬 키: (modified_time, file_name). 둘 다 동일하면 자연 순서.
+        // 메모리: 한 디렉토리 자식 수만큼이라 보통 수십~수백 개. 안전.
+        struct PendingEntry {
+            path: PathBuf,
+            name: String,
+            file_type: std::fs::FileType,
+            size_bytes: u64,
+            modified: SystemTime,
+        }
+        let mut pending: Vec<PendingEntry> = Vec::new();
+
         loop {
             let entry = match entries.next_entry().await {
                 Ok(Some(e)) => e,
@@ -112,42 +131,66 @@ where
             };
 
             let path = entry.path();
-
             // file_type() 는 std::fs::FileType 반환. dir/file/symlink 일관 판별.
             // entry.metadata() 는 심볼릭 링크 타깃을 따라가 "링크 자체" 정보를 잃는다.
             let file_type = match entry.file_type().await {
                 Ok(ft) => ft,
                 Err(_) => continue,
             };
+            let name = entry.file_name().to_string_lossy().into_owned();
 
-            // 심볼릭 링크는 타깃 크기 대신 0 (의미가 모호하므로).
-            let size_bytes = if file_type.is_symlink() {
-                0
+            // 심볼릭 링크는 타깃 크기 / mtime 대신 0/UNIX_EPOCH 폴백.
+            let (size_bytes, modified) = if file_type.is_symlink() {
+                (0, SystemTime::UNIX_EPOCH)
             } else {
-                entry.metadata().await.map(|m| m.len()).unwrap_or(0)
+                match entry.metadata().await {
+                    Ok(m) => (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)),
+                    Err(_) => (0, SystemTime::UNIX_EPOCH),
+                }
             };
 
+            pending.push(PendingEntry {
+                path,
+                name,
+                file_type,
+                size_bytes,
+                modified,
+            });
+        }
+
+        // 정렬: (modified_time, file_name). 같은 mtime 이면 이름 사전순.
+        pending.sort_by(|a, b| {
+            a.modified
+                .cmp(&b.modified)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        let sibling_total = pending.len();
+        for (sibling_index, p) in pending.into_iter().enumerate() {
             // 심볼릭 링크 판별을 dir 보다 먼저! Windows 의 디렉토리 심볼릭은
             // is_dir 도 true 가 될 수 있다 → 잘못 분류 후 재귀 위험.
-            let kind = if file_type.is_symlink() {
+            let kind = if p.file_type.is_symlink() {
                 NodeKind::Link
-            } else if file_type.is_dir() {
+            } else if p.file_type.is_dir() {
                 NodeKind::Directory
             } else {
                 NodeKind::File
             };
 
-            let name = entry.file_name().to_string_lossy().into_owned();
+            // (M7-1 Step 1) Fractal Orbital Packing 으로 자식 좌표 계산.
+            let position =
+                coords::child_position(parent_pos, child_depth, sibling_index, sibling_total);
 
             buffer.push(ScannedNode {
                 // UUID v7 = 시간 정렬 가능. 청크가 순서 없이 도착해도 ID 정렬로
                 // 대략 시간 순 복원 가능 (Step 2 단일 task 라 사실상 보장됨).
                 id: uuid::Uuid::now_v7().to_string(),
-                path: path.to_string_lossy().into_owned(),
-                name,
+                path: p.path.to_string_lossy().into_owned(),
+                name: p.name,
                 kind,
-                size_bytes,
+                size_bytes: p.size_bytes,
                 depth: child_depth,
+                position,
             });
             total_scanned += 1;
 
@@ -165,10 +208,11 @@ where
 
             // 진짜 디렉토리이고 더 깊이 갈 수 있으면 큐에 push.
             // is_symlink 우선 분기이므로 file_type.is_dir() 는 비-심볼릭 디렉토리만 true.
-            if file_type.is_dir() && child_depth < max_depth {
-                if let Ok(canonical) = fs::canonicalize(&path).await {
+            if p.file_type.is_dir() && child_depth < max_depth {
+                if let Ok(canonical) = fs::canonicalize(&p.path).await {
                     if visited.insert(canonical.clone()) {
-                        queue.push_back((canonical, child_depth));
+                        // 부모 좌표 = 이 디렉토리의 좌표 (위에서 계산한 position).
+                        queue.push_back((canonical, child_depth, position));
                     }
                 }
             }
@@ -409,6 +453,55 @@ mod tests {
         assert!(chunks[2].is_last, "종료 청크");
         assert_eq!(chunks[2].nodes.len(), 0, "남은 노드 0");
         assert_eq!(chunks[2].total_scanned, 4);
+    }
+
+    // ---- M7-1 Step 1: 좌표 통합 검증 -------------------------------------
+
+    /// 같은 트리를 두 번 스캔하면 같은 노드의 position 이 동일해야 한다 (결정성).
+    /// 정렬 키 (modified_time, file_name) 가 안정적이면 sibling_index 가 같고
+    /// child_position 이 결정성이라 좌표가 같아야 한다.
+    #[tokio::test]
+    async fn scan_produces_deterministic_positions() {
+        let tmp = tempdir().expect("temp dir");
+        for name in ["alpha.txt", "beta.txt", "gamma.txt"] {
+            stdfs::File::create(tmp.path().join(name)).expect("파일 생성");
+        }
+
+        let nodes_a = scan_directory(tmp.path().to_path_buf(), 5)
+            .await
+            .expect("스캔 1");
+        let nodes_b = scan_directory(tmp.path().to_path_buf(), 5)
+            .await
+            .expect("스캔 2");
+
+        assert_eq!(nodes_a.len(), nodes_b.len(), "노드 수 동일");
+
+        // path → position map 비교
+        for a in &nodes_a {
+            let b = nodes_b.iter().find(|n| n.path == a.path).expect("같은 path");
+            assert_eq!(a.position, b.position, "{} 의 position 일치해야", a.name);
+        }
+    }
+
+    /// 자식 노드 position 이 (0, 0, 0) 이 아니어야 한다.
+    /// root 의 직계 자식은 depth=1, r_d=100,000 만큼 떨어진다.
+    #[tokio::test]
+    async fn scan_assigns_non_origin_positions() {
+        let tmp = tempdir().expect("temp dir");
+        stdfs::File::create(tmp.path().join("file.txt")).expect("파일 생성");
+
+        let nodes = scan_directory(tmp.path().to_path_buf(), 5)
+            .await
+            .expect("스캔");
+        assert_eq!(nodes.len(), 1);
+        let p = nodes[0].position;
+        let mag = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        // depth=1, total=1 → r_adjusted = 100,000 × 1.0
+        assert!(
+            (mag - 100_000.0).abs() < 1.0,
+            "직계 자식 거리 ≈ 100,000, got {}",
+            mag
+        );
     }
 
     /// chunked 가 종료 청크에서 잘못된 chunk_id 를 쓰지 않는지: 단조 증가 보장.

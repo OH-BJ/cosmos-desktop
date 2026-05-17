@@ -100,9 +100,17 @@ function App() {
 
     // 3) InstancedNodes — 빈 상태로 시작. bridge가 곧 채워 넣음.
     //    capacity를 buffer와 동일하게 맞춰야 syncFromBuffer에서 truncation이 없음.
-    const instancedNodes = new InstancedNodes(buffer.capacity);
+    //    M7-1 Step 2: 초기 해상도 주입 — vertex shader 의 uResolution uniform 이
+    //      픽셀 지름 클램프 계산에 H 를 쓰므로 mount 시점부터 정확한 값이 필요.
+    const instancedNodes = new InstancedNodes(buffer.capacity, {
+      resolution: [window.innerWidth, window.innerHeight],
+    });
     instancedNodesRef.current = instancedNodes;
     scene.getScene().add(instancedNodes.getMesh());
+
+    // M7-1 Step 2: resize 시 uResolution uniform 동기 갱신.
+    //   Scene.handleResize 가 매번 이 콜백을 호출하므로 별도 window 리스너 추가 불필요.
+    scene.setResizeCallback((w, h) => instancedNodes.setResolution(w, h));
 
     // 4) DOM 마운트 + 렌더 루프 시작
     scene.mount(containerRef.current);

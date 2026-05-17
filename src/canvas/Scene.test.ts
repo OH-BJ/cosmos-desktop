@@ -206,4 +206,32 @@ describe("Scene", () => {
       expect(() => scene.setRenderCallback(callback)).not.toThrow();
     });
   });
+
+  /**
+   * M7-1 Step 2: setResizeCallback 테스트.
+   *
+   * resize 발생 시 외부 콜백이 새 width/height 로 호출되는지 검증.
+   * InstancedNodes.setResolution 같은 viewport-의존 uniform 갱신 경로를 약결합으로
+   * 보장한다. handleResize 내부에서 호출되므로 window.dispatchEvent('resize') 대신
+   * 등록된 listener 를 직접 호출해 트리거.
+   */
+  describe("setResizeCallback (M7-1 Step 2)", () => {
+    it("resize 콜백이 새 width/height 로 호출됨", () => {
+      const scene = new Scene();
+      const mockContainer = { appendChild: vi.fn() };
+      scene.mount(mockContainer as any);
+
+      const callback = vi.fn();
+      scene.setResizeCallback(callback);
+
+      // window.innerWidth/Height 를 바꾼 뒤 등록된 resize listener 직접 트리거.
+      (globalThis as any).window.innerWidth = 1280;
+      (globalThis as any).window.innerHeight = 720;
+      const resizeListener = windowAddListeners["resize"][0];
+      resizeListener();
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(1280, 720);
+    });
+  });
 });

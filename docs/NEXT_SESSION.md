@@ -1,33 +1,52 @@
-## 다음 세션 재개 포인트 (Day 12 — M7 진입)
+## 다음 세션 재개 포인트 (Day 15+)
 
 ### 직전 완료
-- **M6-2 "Frontend Ingestion" 풀 완주 (D11 단일 세션)** → "First Grounding" 마일스톤 완성
-- 파이프라인 끝-끝 작동: 사용자 트리거 → Rust scanner → 청크 IPC → Frontend 점진 병합 → 시각 렌더 144FPS
-- 시각 검증: ~/Documents depth 5 스캔, 수천 노드 우주 공간 분포, 135–144 FPS, M1~M5 회귀 0
-- 테스트: Rust 25 + JS 103 = **128/128**
+- **M7-1 "Spatial Foundation" 일괄 커밋** (Step 1 + 2 + 3)
+  - Step 1 (좌표): Rust `scanner/coords.rs` Fractal Orbital Packing + BFS 부모좌표 전파 + ScannedNode.position
+  - Step 2 (가시성): InstancedNodes `MeshBasicMaterial.onBeforeCompile` 패치, 4×4px 클램프, BASE_RADIUS=500, uResolution uniform
+  - 카메라 (Step 1 의존): FOV 50°, position.z=270_000, far 1e6, OrbitControls zoom 0.1~1e6
+  - D14 hotfix 부속: StrictMode 청크 리스너 race 시뮬 테스트 2개
+- 테스트: cargo 36/36, vitest 111/111, tsc clean
 
-### M6-2 핵심 결정
-- **InstancedMesh capacity 10000** — 정적, 동적 확장은 M7+
-- **부분 업데이트 (addUpdateRange)** — 청크당 1,000개 = 64KB GPU 업로드 (전체 1/10)
-- **β 옵션** — 새 스캔 시 청크 노드만 리셋, 하드코딩 3개 데모 노드 보존
-- **Stats.js dev only** — `import.meta.env.DEV` 가드, production 빌드 미포함
-- **store.scanProgress** — 좌상단 카운트 + ScanControl 진행 표시 단일 출처
+### 다음 할 일
 
-### 다음 할 일 (Day 12 — M7 후보)
-M7 은 Plan 에서 결정되지 않음. 후보 카드:
-1. **GPU Color Picking** — Raycaster 비용 폭증 시 (10k+ 노드 클릭 1회 ~16ms 측정 필요)
-2. **SQLite 영속성 + CRUD** — 스캔 결과를 휘발성 메모리에서 영구 저장으로
-3. **notify Watcher** — 파일시스템 변경 실시간 반영
-4. **의미 있는 3D 좌표 알고리즘** — random 분포 → 클러스터링/디렉토리 트리 매핑
-5. **Binary IPC 전환** — JSON → bincode/postcard 로 청크 직렬화 비용 ↓
-6. **동적 capacity 확장** — 10000 부족 시 growNodeBuffer 자동 호출
+#### 1. M7-2 "Interaction Layer" (3 Steps)
+- **Step 1**: Offscreen GPU Color Picking 파이프라인
+  - WebGLRenderTarget (offscreen)
+  - Buffer Index u32 → RGB 24bit 인코딩 (1,677만 노드 가능)
+  - Picking 전용 ShaderMaterial 별도 작성
+  - `readRenderTargetPixels` → u32 역변환
+- **Step 2**: 호버 상태 + UI
+  - Zustand `hoveredNodeId` 추가
+  - rAF + Dirty Flag throttle (lodash 금지)
+  - Screen Projected CSS 툴팁 (Floating UI 패턴)
+  - 청크 메타 (path/name/kind/sizeBytes) 표시
+- **Step 3**: M4 클릭 + M7 호버 공존 + 회귀 + 커밋
+  - 색상/스타일 구분 (호버 ≠ 선택)
+  - Raycaster 제거/유지 결정 (Step 2 측정 후)
+  - boundingSphere 호환 (Picking 으로 대체되면 무관)
 
-### 주의 / 알려진 이슈
-- 청크 노드 클릭 → NodeDetailsPanel 은 "메타데이터 없음" 상태 (commands.getNodeDetails 가
-  스캔된 path 를 모름). M7 SQLite 영속성에서 자연스럽게 해결될 예정.
-- ScanControl 컴포넌트 자체는 unit test 없음 — 검증 로직은 scanControlHelpers.test.ts
-  로 분리. 컴포넌트 테스트는 @testing-library/react 도입 시점에 추가.
-- 좌상단 "노드 N개" 는 store.nodes(=3) + scanProgress.totalScanned 합산.
-  buffer.count 와 항상 일치 — store/buffer 동기화 깨지면 여기가 어긋날 수 있어
-  디버그 시 첫 확인 지점.
-- Ctrl+S 임시 단축키는 dev-only. ScanControl 패널과 동일한 handleStartScan 호출.
+#### 2. 알려진 후속 작업 (M7-2 또는 그 이후 카드로 보관)
+- **depth-aware instance scale**: BASE_RADIUS=500 으로 D5(≈10) 침투 시 화면 폭발. coords.rs 에서 depth 별 instanceMatrix scale 산출 → InstancedNodes 가 setMatrixAt 시 적용. M7-2 와 함께 처리하거나 별도 마일스톤으로 분리 가능.
+- **chunk_id reset on new scan**: 새 스캔 시작 시 backend chunk_id 카운터 미초기화 (경고만, 기능 영향 X).
+- **카메라 초기 위치 미세 튜닝**: 별자리 무게중심 기반 자동 fit (현재는 z=270K 하드코딩).
+- **ShaderMaterial boundingSphere 호환**: size attenuation 으로 화면 클램프된 노드는 Raycaster 가 못 잡음. M7-2 GPU Picking 으로 자연 해결 — Raycaster 폐기 시점 결정 필요.
+
+### 사전 정리된 결정 (재논의 X)
+- 좌표 알고리즘: Fractal Orbital Packing (Gemini Pro H 채택)
+- 거리 스케일: D1=100K / D2=10K / D3=1K / D4=100 / D5=10
+- Picking 방식: Color Buffer (Offscreen WebGLRenderTarget)
+- 호버 throttle: rAF + Dirty Flag (lodash 금지)
+- 호버 UI: Screen Projected CSS 툴팁
+- 메타데이터: 청크에 이미 있는 거 사용
+
+### 주의
+- 시각 검증 스크린샷은 사용자 직접 업로드
+- BASE_RADIUS=500 은 임시 평균값 — D5 줌인 시 폭발 인지, 후속 마일스톤에서 정공법
+- Logarithmic Depth Buffer 신뢰 (D5 결정) — 100K~10 스케일 차이도 z-fighting X
+
+### 이슈 1 후속 (학습 정리, 미진행)
+- 노션에 "막힌 문제 카드" + 학습 노트 작성
+  - StrictMode 더블 마운트 + 비동기 listen Promise race
+  - cancelled 클로저 패턴이 표준 해법인 이유
+  - sceneRef 가드만으로 무력화되는 경로 도식화

@@ -3,52 +3,148 @@ import { NodeBuffer } from "../../state/nodeBuffer";
 import { useCosmosStore } from "../../state/store";
 
 /**
- * InstancedNodes — 대용량 노드 렌더링 모듈 (M2: bridge 연동 버전)
+ * InstancedNodes — 대용량 노드 렌더링 모듈 (M7-1 Step 2: Size Attenuation)
  *
  * 개별 THREE.Mesh 대신 THREE.InstancedMesh를 사용해 수만 개 노드를 GPU에서 한 번에 렌더.
  * 드로우콜 1회로 모든 노드를 그리므로, CPU-GPU 통신 오버헤드 제거.
  *
- * M2 전환점 — bridge의 단방향 데이터 흐름:
+ * M7-1 Step 2 전환점 — 최소 4×4px Hit-Area 보장 (Size Attenuation):
+ *   D1=100,000 거리 노드는 줌아웃 시 1px 미만으로 줄어 GPU 가 서브픽셀로 렌더 생략.
+ *   → 거리 무관 최소 4px 클램프를 vertex shader 에서 적용해 별자리 윤곽을 항상 가시화.
+ *
+ * 셰이더 통합 방식:
+ *   `MeshBasicMaterial.onBeforeCompile` 로 `<project_vertex>` 청크만 패치.
+ *   - three.js 의 `USE_INSTANCING` define / `attribute mat4 instanceMatrix` 자동 주입 유지
+ *   - `logarithmicDepthBuffer=true` (Scene) 가 의존하는 `<logdepthbuf_vertex>` 등 후속 청크 보존
+ *   - 풀 ShaderMaterial 대비 학습 곡선 / 회귀 위험 최소
+ *
+ * 핵심 수식 (vertex shader):
+ *   centerView    = modelViewMatrix * instanceCenter            // 인스턴스 중심의 view 공간 좌표
+ *   pixelDiameter = baseRadius * projectionMatrix[1][1] * H / depth   // 화면상 지름 (px)
+ *   scaleFactor   = max(1, minPixel / pixelDiameter)            // 최소 4px 보장
+ *   mvPosition    = centerView + (vertexView - centerView) * scaleFactor
+ *
+ * projectionMatrix[1][1] = 1 / tan(fov/2) — 광학적 focal length 인자.
+ * 화면 수직 픽셀 수(H) 와 view 공간 depth 로 화면 지름을 역산한다.
+ *
+ * 데이터 흐름은 M2 그대로:
  *   Zustand store → bridge.syncFromStore → NodeBuffer (Float32Array)
  *                                            ↓
  *   InstancedNodes.syncFromBuffer → InstancedMesh.instanceMatrix
- *
- * 이 클래스는 NodeBuffer의 positions 배열을 **읽기 전용**으로 소비한다.
- * 직접 addNode/updateNode 같은 쓰기 API는 제공하지 않는다. (단일 진입점 원칙)
- *
- * 성능 설계: instanceMatrix.needsUpdate는 syncFromBuffer 호출 시에만 true가 되며,
- * 매 프레임 갱신하지 않는다. 노드 좌표가 바뀔 때만 GPU로 업로드.
  */
+
+// BASE_RADIUS=500 — Fractal Orbital Packing 의 100K 거리 스케일에 맞춘 월드 반지름.
+//   5.0 일 때 모든 깊이에서 pixelDiameter < 4 → 항상 4px 클램프만 발동 (별 크기 고정).
+//   500 으로 키우면 D1 줌인(z≈10K)에서 입체 별로 보이고, 줌아웃 시 4px 클램프 자연 전이.
+//   D5(≈10) 침투 시 화면 폭발 문제는 인지 — depth-aware instance scale 로 후속 마일스톤 해결.
+//   uBaseRadius uniform 과 반드시 일치해야 함 (vertex shader pixelDiameter 계산 기준).
+const BASE_RADIUS = 500.0;
+const MIN_PIXEL_SIZE = 4.0; // 최소 화면 지름 (px). 4×4 Hit-Area 보장 (Step 2 목표).
+
 export class InstancedNodes {
   private mesh: THREE.InstancedMesh;
   private capacity: number; // 최대 인스턴스 수 (생성자에서 고정)
+  private material: THREE.MeshBasicMaterial;
+
+  // M7-1 Step 2: 외부 보유 uniform 객체.
+  //   onBeforeCompile 은 첫 렌더(WebGL) 시점에만 호출되므로 jsdom 테스트에서는 절대
+  //   호출되지 않는다. 셰이더의 shader.uniforms 와 동일한 { value } 참조를 공유시켜
+  //   - GPU 가 매 프레임 이 객체의 .value 를 읽어가고
+  //   - setResolution() 같은 외부 API 가 .value 만 갱신하면 자동 반영되도록 한다.
+  private readonly uniforms: {
+    uResolution: { value: THREE.Vector2 };
+    uMinPixelSize: { value: number };
+    uBaseRadius: { value: number };
+  };
 
   // M4 Step 2: 선택 하이라이트 구독 해제 함수 (bindSelectionHighlight 가 반환).
   private highlightUnsub: (() => void) | null = null;
 
-  constructor(capacity: number = 1024) {
-    // three.js InstancedMesh 개념:
-    // 동일한 Geometry와 Material을 여러 번 그리되, 위치/회전/스케일만 다름.
-    // 이를 GPU 인스턴싱으로 처리하면 드로우콜 1회 → N개 노드 렌더링.
+  /**
+   * @param capacity 최대 인스턴스 수 (NodeBuffer.capacity 와 맞추는 것이 안전).
+   * @param options.resolution 초기 화면 해상도 [w, h]. 미지정 시 [1, 1] —
+   *   App 측에서 mount 직후 `setResolution(window.innerWidth, window.innerHeight)` 호출 필수.
+   *   node 테스트 환경에는 window 가 없어서 기본값을 안전한 더미로 둠.
+   */
+  constructor(
+    capacity: number = 1024,
+    options?: { resolution?: [number, number] }
+  ) {
+    // Geometry: 기본 작은 구형 (반지름 BASE_RADIUS).
+    //   vertex shader 의 uBaseRadius 와 반드시 동일 — pixelDiameter 계산이 일치해야
+    //   "가까울 땐 원본 크기, 멀 땐 4px" 의 자연스러운 전이가 성립한다.
+    const geometry = new THREE.SphereGeometry(BASE_RADIUS, 16, 16);
 
-    // Geometry: 기본 작은 구형 (반지름 5)
-    const geometry = new THREE.SphereGeometry(5, 16, 16);
+    // uniforms 객체 — shader.uniforms 와 객체 참조를 공유한다.
+    const [initW, initH] = options?.resolution ?? [1, 1];
+    this.uniforms = {
+      uResolution: { value: new THREE.Vector2(initW, initH) },
+      uMinPixelSize: { value: MIN_PIXEL_SIZE },
+      uBaseRadius: { value: BASE_RADIUS },
+    };
 
-    // Material: 기본 흰색 반사 재질
-    // 나중에 MSDF 텍스트나 아이콘이 추가될 때 ShaderMaterial로 교체
-    const material = new THREE.MeshPhongMaterial({
-      color: 0xffffff,
-      emissive: 0x333333,
-    });
+    // Material: MeshBasicMaterial 베이스 + onBeforeCompile 패치.
+    //   MeshPhongMaterial(M2) 에서 Basic 으로 다운그레이드 — 라이트 없이도 보이고
+    //   셰이더 청크가 단순해져 패치 범위 최소.  나중에 호버/선택 색상 구분이 필요하면
+    //   instanceColor 추가로 충분 (M7-2 Picking 단계에서 별도 material 분리 예정).
+    this.material = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+    // 핵심 패치: <project_vertex> 청크 전체를 교체해 size attenuation 클램프 적용.
+    //   - <common> 직후에 uniform 선언 삽입
+    //   - <project_vertex> 자리에 새 mvPosition / gl_Position 계산 삽입
+    //   - 이후 <logdepthbuf_vertex> 가 gl_Position.z 를 읽는 흐름은 그대로 유지됨
+    this.material.onBeforeCompile = (shader) => {
+      // shader.uniforms 와 외부 보유 uniforms 의 { value } 참조를 공유.
+      //   setResolution 으로 외부 .value 만 갱신해도 GPU 가 매 프레임 읽어감.
+      shader.uniforms.uResolution = this.uniforms.uResolution;
+      shader.uniforms.uMinPixelSize = this.uniforms.uMinPixelSize;
+      shader.uniforms.uBaseRadius = this.uniforms.uBaseRadius;
+
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+uniform vec2 uResolution;
+uniform float uMinPixelSize;
+uniform float uBaseRadius;`
+        )
+        .replace(
+          "#include <project_vertex>",
+          `
+// --- M7-1 Step 2: Size Attenuation (min 4px clamp) ---
+// 인스턴스 중심 (object space (0,0,0)) 과 현재 vertex 를 각각 view 공간으로.
+vec4 _instCenterLocal = vec4(0.0, 0.0, 0.0, 1.0);
+vec4 _vertexLocal = vec4(transformed, 1.0);
+#ifdef USE_INSTANCING
+  _instCenterLocal = instanceMatrix * _instCenterLocal;
+  _vertexLocal = instanceMatrix * _vertexLocal;
+#endif
+vec4 _centerView = modelViewMatrix * _instCenterLocal;
+vec4 _vertexView = modelViewMatrix * _vertexLocal;
+
+// 화면상 base sphere 의 지름 (px). projectionMatrix[1][1] = 1/tan(fov/2).
+//   pixelRadius = r * P11 * (H/2) / depth → diameter = r * P11 * H / depth.
+float _depth = max(-_centerView.z, 0.001);
+float _pixelDiameter = uBaseRadius * projectionMatrix[1][1] * uResolution.y / _depth;
+// 멀어서 4px 미만이면 scaleFactor>1 로 키움, 가까울 땐 1.0 으로 원본 크기 유지.
+float _scaleFactor = max(1.0, uMinPixelSize / _pixelDiameter);
+
+// 중심 기준으로 vertex 오프셋을 view 공간에서 균등 스케일.
+//   mvPosition 변수명은 후속 청크 (<fog_vertex>, <worldpos_vertex>) 가 참조하므로 보존.
+vec4 mvPosition = _centerView + (_vertexView - _centerView) * _scaleFactor;
+gl_Position = projectionMatrix * mvPosition;
+`
+        );
+    };
+    // onBeforeCompile 을 쓰면 같은 source 가 서로 다른 인스턴스에서 캐시 충돌 가능 →
+    //   고유 key 로 program 캐시를 격리.  (uniforms 가 같은 GLSL 을 공유하므로 단일 키 OK.)
+    this.material.customProgramCacheKey = () => "cosmos-instanced-size-attenuation";
 
     // InstancedMesh(geometry, material, capacity)
-    // capacity: 최대 몇 개까지 인스턴싱할지 (동적 확장은 M3+)
-    this.mesh = new THREE.InstancedMesh(geometry, material, capacity);
+    this.mesh = new THREE.InstancedMesh(geometry, this.material, capacity);
     this.capacity = capacity;
 
     // 초기 상태: count = 0 (렌더할 인스턴스 없음).
-    // bridge가 syncFromBuffer로 실제 노드를 채워 넣을 때까지 아무것도 안 그림.
-    // M1에서는 여기서 원점 노드를 기본 1개 넣었으나, M2부터는 bridge가 유일한 쓰기 경로.
     this.mesh.count = 0;
     this.mesh.instanceMatrix.needsUpdate = true;
   }
@@ -126,7 +222,36 @@ export class InstancedNodes {
     //    광선이 sphere 를 스치지 못해 intersects 가 항상 0 이 된다 (Gemini 자문).
     //  - 비용은 O(count) 로 매우 작음 → 매 sync 마다 호출해도 무해.
     //  - 부분 업데이트 시에도 신규 노드 위치가 sphere 바깥일 수 있어 항상 재계산.
+    //
+    // 주의 (M7-1 Step 2): boundingSphere 는 *원본* geometry 반지름 기준이라 화면 클램프된
+    //   distant 노드는 여전히 ray hit 가 어렵다. Raycaster 기반 클릭 정확도 문제는
+    //   M7-2 GPU Color Picking 에서 본격 해결.
     this.mesh.computeBoundingSphere();
+  }
+
+  /**
+   * setResolution() — 화면 해상도 uniform 갱신 (M7-1 Step 2).
+   *
+   * 픽셀 지름 계산이 viewport height (H) 에 의존하므로 resize 시 갱신 필수.
+   * App.tsx 의 mount/resize 핸들러에서 호출. uniforms 객체는 onBeforeCompile 호출
+   * 여부와 무관하게 항상 유효 (테스트 환경에서도 OK).
+   */
+  setResolution(width: number, height: number): void {
+    this.uniforms.uResolution.value.set(width, height);
+  }
+
+  /**
+   * getUniforms() — 셰이더 uniform 객체 노출 (테스트용).
+   *
+   * Resolution 갱신 / 초기값 검증 / pixelMinSize 정책 변경 같은 단위 테스트가
+   * shader.uniforms 컴파일 이후 상태에 의존하지 않도록 외부 보유 객체를 그대로 노출.
+   */
+  getUniforms(): {
+    uResolution: { value: THREE.Vector2 };
+    uMinPixelSize: { value: number };
+    uBaseRadius: { value: number };
+  } {
+    return this.uniforms;
   }
 
   /**

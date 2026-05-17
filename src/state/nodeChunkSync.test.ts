@@ -1,13 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 /**
- * nodeChunkSync 단위 테스트 (M6-2 Step 1)
+ * nodeChunkSync 단위 테스트 (M6-2 Step 1 → M7-1 Step 1 갱신)
  *
  * 검증 범위:
  *  - processNodeChunk: 청크의 노드들을 buffer/bridge 매핑에 점진 append
  *  - 중복 ID 방어
  *  - capacity 초과 시 거부
- *  - randomCoord 주입으로 결정론적 좌표 검증
+ *  - **ScannedNode.position 직접 사용** (random 폴백 제거)
  *  - setupNodeChunkSync: events.nodeChunkEvent.listen 이 호출되고 unsub 반환
  *
  * 모킹 전략:
@@ -40,21 +40,12 @@ const mockedListen = events.nodeChunkEvent.listen as unknown as ReturnType<
 >;
 
 /**
- * 결정론적 좌표 시퀀스를 만드는 헬퍼.
- *
- * randomCoord 는 노드당 3번 호출되므로 (x, y, z), 시퀀스를 한 줄로 깔끔하게 정의.
- * 끝에 도달해도 안전하게 0 을 반환 (테스트 디버깅 편의).
+ * ScannedNode 형태의 stub 생성. (M7-1 Step 1) position 필수.
  */
-function makeCoordSeq(values: number[]): () => number {
-  let i = 0;
-  return () => (i < values.length ? values[i++] : 0);
-}
-
-/**
- * ScannedNode 형태의 stub 생성. 이 테스트 범위에선 path/name/kind/sizeBytes/depth 는
- * 사용하지 않지만 타입 만족 위해 채움.
- */
-function makeScannedNode(id: string) {
+function makeScannedNode(
+  id: string,
+  position: [number, number, number] = [0, 0, 0]
+) {
   return {
     id,
     path: `/test/${id}`,
@@ -62,19 +53,20 @@ function makeScannedNode(id: string) {
     kind: "file" as const,
     sizeBytes: 0,
     depth: 1,
+    position,
   };
 }
 
 function makeChunk(
   chunkId: number,
-  ids: string[],
+  nodes: Array<{ id: string; position?: [number, number, number] }>,
   isLast = false
 ): NodeChunkEvent {
   return {
     chunkId,
-    nodes: ids.map(makeScannedNode),
+    nodes: nodes.map((n) => makeScannedNode(n.id, n.position ?? [0, 0, 0])),
     isLast,
-    totalScanned: ids.length,
+    totalScanned: nodes.length,
   };
 }
 
@@ -85,13 +77,15 @@ describe("processNodeChunk", () => {
     syncFromStore([], allocateNodeBuffer(8));
   });
 
-  it("청크 1개 → buffer / 매핑 점진 append", () => {
+  it("청크 1개 → buffer / 매핑 점진 append (position 그대로 사용)", () => {
     const buffer = allocateNodeBuffer(16);
-    const chunk = makeChunk(0, ["a", "b", "c"]);
-    // 결정론적 좌표: 노드 a=(1,2,3), b=(4,5,6), c=(7,8,9)
-    const coords = makeCoordSeq([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    const chunk = makeChunk(0, [
+      { id: "a", position: [1, 2, 3] },
+      { id: "b", position: [4, 5, 6] },
+      { id: "c", position: [7, 8, 9] },
+    ]);
 
-    const appended = processNodeChunk(chunk, buffer, coords);
+    const appended = processNodeChunk(chunk, buffer);
 
     expect(appended).toBe(3);
     expect(buffer.count).toBe(3);
@@ -109,12 +103,20 @@ describe("processNodeChunk", () => {
 
   it("청크 2개 연속 → append-only (기존 매핑 보존)", () => {
     const buffer = allocateNodeBuffer(16);
-    processNodeChunk(makeChunk(0, ["a", "b"]), buffer, makeCoordSeq([
-      1, 1, 1, 2, 2, 2,
-    ]));
-    processNodeChunk(makeChunk(1, ["c", "d"]), buffer, makeCoordSeq([
-      3, 3, 3, 4, 4, 4,
-    ]));
+    processNodeChunk(
+      makeChunk(0, [
+        { id: "a", position: [1, 1, 1] },
+        { id: "b", position: [2, 2, 2] },
+      ]),
+      buffer
+    );
+    processNodeChunk(
+      makeChunk(1, [
+        { id: "c", position: [3, 3, 3] },
+        { id: "d", position: [4, 4, 4] },
+      ]),
+      buffer
+    );
 
     expect(buffer.count).toBe(4);
     // 첫 청크의 매핑이 그대로 살아있는지 — full-rewrite 가 아닌 append 임을 보장.
@@ -127,19 +129,22 @@ describe("processNodeChunk", () => {
   it("중복 ID → 건너뛰고 카운트 정확", () => {
     const buffer = allocateNodeBuffer(16);
     // 첫 청크: a, b
-    processNodeChunk(makeChunk(0, ["a", "b"]), buffer, makeCoordSeq([
-      1, 1, 1, 2, 2, 2,
-    ]));
-    // 둘째 청크: b(중복), c
+    processNodeChunk(
+      makeChunk(0, [
+        { id: "a", position: [1, 1, 1] },
+        { id: "b", position: [2, 2, 2] },
+      ]),
+      buffer
+    );
+    // 둘째 청크: b(중복), c. b 는 거부되고 c 만 append.
     const appended = processNodeChunk(
-      makeChunk(1, ["b", "c"]),
-      buffer,
-      // b 도 좌표를 소비하긴 한다 (appendChunkedNode 가 거부 전 randomCoord 가 미리 호출됨)
-      // → 결정론적 시퀀스로 6개 (b=skip, c=실제 사용) 준비.
-      makeCoordSeq([9, 9, 9, 3, 3, 3])
+      makeChunk(1, [
+        { id: "b", position: [9, 9, 9] }, // 거부됨 (덮어쓰기 X)
+        { id: "c", position: [3, 3, 3] },
+      ]),
+      buffer
     );
 
-    // b 는 거부되었으므로 1개만 append.
     expect(appended).toBe(1);
     expect(buffer.count).toBe(3);
     // b 의 인덱스는 첫 청크의 1 그대로 유지 (덮어쓰기 X).
@@ -153,9 +158,12 @@ describe("processNodeChunk", () => {
   it("capacity 초과 → 초과분만 거부, 나머지는 정상 append", () => {
     const buffer = allocateNodeBuffer(2);
     const appended = processNodeChunk(
-      makeChunk(0, ["a", "b", "c"]),
-      buffer,
-      makeCoordSeq([1, 1, 1, 2, 2, 2, 9, 9, 9])
+      makeChunk(0, [
+        { id: "a", position: [1, 1, 1] },
+        { id: "b", position: [2, 2, 2] },
+        { id: "c", position: [9, 9, 9] },
+      ]),
+      buffer
     );
 
     // capacity 2 라 a, b 만 들어가고 c 는 거부.
@@ -166,15 +174,26 @@ describe("processNodeChunk", () => {
 
   it("isLast 플래그는 처리에 영향 없음 (상태/카운트 무관)", () => {
     const buffer = allocateNodeBuffer(16);
-    const chunk = makeChunk(0, ["solo"], true);
-    const appended = processNodeChunk(
-      chunk,
-      buffer,
-      makeCoordSeq([0, 0, 0])
-    );
+    const chunk = makeChunk(0, [{ id: "solo", position: [0, 0, 0] }], true);
+    const appended = processNodeChunk(chunk, buffer);
     expect(appended).toBe(1);
     expect(buffer.count).toBe(1);
     // isLast 는 종료 신호 (UI 표시 용) — 본 모듈에서는 추가 동작이 없어야 함.
+  });
+
+  it("Rust 가 보낸 position 을 그대로 신뢰 (frontend 변환 X)", () => {
+    const buffer = allocateNodeBuffer(8);
+    // M7-1: Fractal Orbital Packing 좌표 예시 (depth=1, root 직계 자식)
+    // r ≈ 100,000. 단위 구면 위 한 점에 100,000 곱한 형태.
+    const chunk = makeChunk(0, [
+      { id: "deep-coord", position: [99999.5, -12345.6, 7890.1] },
+    ]);
+    processNodeChunk(chunk, buffer);
+    const got = getNodePosition(buffer, 0);
+    // Float32Array 라 정밀도 약간 손실되지만 1e-2 오차 이내.
+    expect(got[0]).toBeCloseTo(99999.5, 0);
+    expect(got[1]).toBeCloseTo(-12345.6, 0);
+    expect(got[2]).toBeCloseTo(7890.1, 0);
   });
 });
 
@@ -198,6 +217,132 @@ describe("setupNodeChunkSync", () => {
     expect(fakeUnsub).toHaveBeenCalledTimes(1);
   });
 
+  it("(fix m6-2) StrictMode race: Mount1 cancelled 플래그로 listener 즉시 unsub", async () => {
+    // 시나리오 — React 19 StrictMode 더블 마운트 레이스 모사:
+    //   1) Mount 1: setupNodeChunkSync 호출 → Promise 1 pending (listen 비동기)
+    //   2) StrictMode cleanup: cancelled1 = true (Promise 1 의 unsub 은 아직 없음)
+    //   3) Mount 2: setupNodeChunkSync 다시 호출 → Promise 2 pending
+    //   4) Promise 1 resolve → cancelled1 검사 후 즉시 unsub → listener 1 제거
+    //   5) Promise 2 resolve → 정상 보관 → listener 2 만 살아남음
+    //
+    // 가짜 event bus: 등록된 handler 들을 Set 로 관리, fire 시 살아있는 것만 호출.
+    // 실제 Tauri 의 listen 동작 (unsub 호출 시 dispatcher 에서 제거) 을 모사.
+    const liveHandlers = new Set<
+      (event: { payload: NodeChunkEvent }) => void
+    >();
+
+    let resolve1!: () => void;
+    let resolve2!: () => void;
+
+    mockedListen
+      .mockImplementationOnce(
+        (handler: (event: { payload: NodeChunkEvent }) => void) =>
+          new Promise<() => void>((resolve) => {
+            resolve1 = () => {
+              liveHandlers.add(handler);
+              resolve(() => liveHandlers.delete(handler));
+            };
+          })
+      )
+      .mockImplementationOnce(
+        (handler: (event: { payload: NodeChunkEvent }) => void) =>
+          new Promise<() => void>((resolve) => {
+            resolve2 = () => {
+              liveHandlers.add(handler);
+              resolve(() => liveHandlers.delete(handler));
+            };
+          })
+      );
+
+    const buffer = allocateNodeBuffer(16);
+    const onAfterChunk = vi.fn();
+
+    // Mount 1: 자기 전용 cancelled 클로저 (App.tsx useEffect 가 하는 패턴 그대로).
+    let cancelled1 = false;
+    setupNodeChunkSync(buffer, { onAfterChunk }).then((unsub) => {
+      if (cancelled1) {
+        unsub();
+        return;
+      }
+    });
+
+    // StrictMode 즉시 cleanup: Mount 1 의 effect 가 떼어짐.
+    cancelled1 = true;
+
+    // Mount 2: 새 effect 인스턴스 = 새 cancelled 클로저.
+    let cancelled2 = false;
+    setupNodeChunkSync(buffer, { onAfterChunk }).then((unsub) => {
+      if (cancelled2) {
+        unsub();
+        return;
+      }
+    });
+
+    // 두 listen 호출 모두 pending — handler 는 아직 bus 에 안 붙어 있다.
+    expect(mockedListen).toHaveBeenCalledTimes(2);
+    expect(liveHandlers.size).toBe(0);
+
+    // Tauri 가 두 listen 모두 처리 → resolve. .then microtask 흐름 보장 위해 flush.
+    resolve1();
+    resolve2();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // 핵심 검증: Mount 1 의 listener 는 cancelled1 가드로 즉시 unsub → bus 에서 제거.
+    //   Mount 2 의 listener 만 살아남는다.
+    expect(liveHandlers.size).toBe(1);
+
+    // 청크 발사 — 살아있는 handler 들만 호출 (실제 Tauri 의 broadcast 모사).
+    const chunk = makeChunk(
+      0,
+      [{ id: "live", position: [1, 1, 1] }],
+      true
+    );
+    for (const h of liveHandlers) h({ payload: chunk });
+
+    // 청크가 1번만 처리됨 — fix 없으면 onAfterChunk 가 2번 호출되고 buffer.count 도
+    //   2 가 되어야 한다 (두 번째는 중복 ID 라 거부되지만 onAfterChunk 는 그대로 발화).
+    expect(onAfterChunk).toHaveBeenCalledTimes(1);
+    expect(buffer.count).toBe(1);
+  });
+
+  it("(fix m6-2) cancelled=false 면 정상 보관 — fix 가 정상 케이스를 깨뜨리지 않는다", async () => {
+    // 회귀 방지: cancelled 플래그 도입 후에도 정상 마운트 1회 케이스에서
+    // listener 가 살아있고 청크가 정확히 1번 처리되는지.
+    const liveHandlers = new Set<
+      (event: { payload: NodeChunkEvent }) => void
+    >();
+    mockedListen.mockImplementationOnce(
+      async (handler: (event: { payload: NodeChunkEvent }) => void) => {
+        liveHandlers.add(handler);
+        return () => liveHandlers.delete(handler);
+      }
+    );
+
+    const buffer = allocateNodeBuffer(16);
+    const onAfterChunk = vi.fn();
+
+    let cancelled = false;
+    let savedUnsub: (() => void) | null = null;
+    setupNodeChunkSync(buffer, { onAfterChunk }).then((unsub) => {
+      if (cancelled) {
+        unsub();
+        return;
+      }
+      savedUnsub = unsub;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(liveHandlers.size).toBe(1);
+    expect(savedUnsub).not.toBeNull();
+
+    const chunk = makeChunk(0, [{ id: "x", position: [0, 0, 0] }], true);
+    for (const h of liveHandlers) h({ payload: chunk });
+    expect(onAfterChunk).toHaveBeenCalledTimes(1);
+    expect(buffer.count).toBe(1);
+  });
+
   it("listener 발화 → buffer append + onAfterChunk 호출", async () => {
     let registeredHandler:
       | ((event: { payload: NodeChunkEvent }) => void)
@@ -209,19 +354,24 @@ describe("setupNodeChunkSync", () => {
 
     const buffer = allocateNodeBuffer(16);
     const onAfterChunk = vi.fn();
-    await setupNodeChunkSync(buffer, {
-      randomCoord: makeCoordSeq([1, 1, 1, 2, 2, 2]),
-      onAfterChunk,
-    });
+    await setupNodeChunkSync(buffer, { onAfterChunk });
 
     expect(registeredHandler).not.toBeNull();
-    const chunk = makeChunk(0, ["a", "b"], true);
+    const chunk = makeChunk(
+      0,
+      [
+        { id: "a", position: [1, 1, 1] },
+        { id: "b", position: [2, 2, 2] },
+      ],
+      true
+    );
     // Tauri event handler 시그니처: { payload, event, id, ... } — 우리는 payload 만 사용.
     registeredHandler!({ payload: chunk });
 
     expect(buffer.count).toBe(2);
     expect(getIdToIndex().get("a")).toBe(0);
     expect(getIdToIndex().get("b")).toBe(1);
+    expect(getNodePosition(buffer, 0)).toEqual([1, 1, 1]);
     expect(onAfterChunk).toHaveBeenCalledTimes(1);
     expect(onAfterChunk).toHaveBeenCalledWith(chunk);
   });

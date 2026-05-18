@@ -1,47 +1,56 @@
-## 다음 세션 재개 포인트 (Day 16+)
+## 다음 세션 재개 포인트 (Day 17+)
 
 ### 직전 완료
-- **M7-2 "Interaction Layer" 일괄 커밋** (Step 1 + 2 + 3, f9a4a00)
-  - Step 1 (GPU Color Picking): Offscreen 1×1 RT, (id+1) 24bit RGB 인코딩, 메인과 동일 size-attenuation 셰이더 공유 (시각 픽셀 = 판정 픽셀)
-  - Step 2 (호버 + 툴팁): `projection.ts` 순수 함수, `HoverTooltip` DOM 직접 조작 (재렌더 0), CameraController rAF + Dirty Flag throttle, `indexToName` path 폴백
-  - Picker hotfix (uTanHalfFov): `setViewOffset` 이 P11 부풀려 D5 작은 노드 픽 실패하던 버그 → 메인/픽커 모두 `1/tan(fov/2)` uniform 으로 우회
-- **Depth-Aware instance scale** (D15 후속 카드 동시 완료)
-  - Rust `scale_for_depth(d)`: 5000/500/50/5/0.5/0.05
-  - BASE_RADIUS=1 로 의미 분리, instanceMatrix uniform scale 합성 (matrix.compose)
-  - M4 highlight mesh 도 buffer.scales 동기 (시각 회귀 0)
-- "First Constellation" 마일스톤 (M7-1 + M7-2) 완성. M7 종료.
-- 테스트: cargo 41/41 (+5), vitest 133/133 (+22 누적), tsc clean
+- **M8 "First Voyage" 일괄 커밋** (Step 1 + 2 + 3, 5e9703b)
+  - Step 1 (Fly-to): `CameraAnimator` 직접 lerp + rAF + easeInOutCubic, 800ms duration, OrbitControls 일시 비활성, 더블 클릭 → 노드 부근 비행
+  - Step 2 (검색): Cmd/Ctrl+F 좌측 Spotlight 패널 (pointer-events 트릭으로 캔버스 보존), substring + matchStart/length 정렬, 매칭 금빛 + 1.5× / 비매칭 거의 검정 / 호버 흰빛 + 2.0×, M4 highlight 도 scale 동기
+  - Step 3 (Auto-fit): `computeFitView` AABB + FOV 기반 distance, isLast 청크 자동 fit + 우상단 ⌂ HomeButton, 세 경로 (더블클릭/검색/홈) 모두 같은 CameraAnimator
+- **M7.5 부채 청산** (별도 fix 커밋 3be4e4c)
+  - Raycaster 폐기 (GPU Picker 대체) + ESC 콜백 분리 (`onEscClear`)
+  - chunk_id reset on new scan (휴리스틱 — `chunkId === 0` 자동 리셋)
+  - Max Pixel Size clamp (`uMaxPixelRatio`, 기본 H×0.1 상한)
+- "First Voyage" 마일스톤 완성. M8 종료.
+- 테스트: cargo 41/41 (변동 없음), vitest 134 → **163** (+29 누적), tsc clean
 
 ### 다음 할 일
 
-#### 1. M8 진입 후보 (Gemini 자문 권장)
-- **CRUD + 영속성**: 노드 추가/수정/삭제 IPC + SQLite 영속 (tauri-plugin-sql 이미 와이어드)
-- **카메라 자동 fit**: 별자리 무게중심 기반 초기 카메라 위치 산출 (지금은 z=270K 하드코딩)
-- **검색/필터 UI**: 노드 이름/path 텍스트 검색 → InstancedMesh 하이라이트 (또는 색상 변경)
-- 셋 중 우선순위 결정 필요
+#### 1. M9 진입 후보 (Gemini 자문 권장)
+- **CRUD + 영속성**: 비-파일 노드 (메모/링크/태그/주석) SQLite 저장 — tauri-plugin-sql 이미 와이어드
+- **파일시스템 watcher (notify crate)**: 외부에서 파일 변경 시 자동 반영 + 스캔 트리거
+- **AI 통합**: Claude API / 로컬 LLM 으로 노드 자동 분류/태깅/검색 강화
+- **다른 차별화**: 컬렉션 (드래그 멀티 선택), 가상 폴더, 시간축 (modified 기준 클러스터)
+- 셋~넷 중 우선순위 결정 필요. 차별화 정도 + 구현 비용 + 타겟 사용자 가치로 평가.
 
-#### 2. 알려진 후속 작업 (M8 또는 그 이후 카드)
-- **Raycaster 폐기 검토**: M7-2 에서 GPU Picker 가 시각/판정 일치로 대체. CameraController 의 `onPick(Raycaster)` 경로는 `onPickPixel(GPU)` 직후 호출되어 결과를 덮어쓰는 구조 → Raycaster 코드 제거 가능. 단 CameraController.test 4건이 Raycaster mock 전제 → 동시 정리 필요.
-- **chunk_id reset on new scan**: 새 스캔 시작 시 backend chunk_id 카운터 미초기화 (경고만, 기능 영향 X).
-- **HoverTooltip JSX 단위 테스트 미작성**: vitest 환경이 node 라 React/DOM 렌더 검증 밖. 시각 검증으로 위임 중 — happy-dom 도입 시 추가 가능.
-- **호버 시각 효과 (옵션 B/C)**: 현재는 툴팁만. 호버 노드 instanceColor 살짝 밝히기 등은 후속.
-- **D5 줌인 시 클램프 동작 검증**: depth-aware scale 도입으로 D5 scale=0.05 까지 작아짐. 카메라가 D5 가까이 침투할 때 4×4 px 클램프가 폭발 없이 자연 전이하는지 육안 검증 미수행.
-- **카메라 자동 fit 알고리즘**: BFS 좌표 무게중심 + 표준편차 → 적정 z 거리 산출 함수 신규.
+#### 2. 알려진 후속 작업 (M9 또는 그 이후 카드)
+- **검색 emissive bloom**: 현재는 instanceColor 단순 곱셈. PBR 추가 비용으로 별 자체가 발광하는 효과 가능.
+- **검색 매칭이 시야 밖일 때**: Auto-fit 의 변형 — 매칭 노드만 bbox 잡아 fit. 결과 클릭 안 해도 자동.
+- **호버 시각 효과 (Step 2 옵션 B/C)**: 호버 노드 instanceColor 부드러운 펄스 — 시간 기반 sin wave.
+- **CameraAnimator easing 변종**: 노드 거리 비례 duration (멀리 가면 더 오래).
+- **HoverTooltip JSX 단위 테스트 미작성**: vitest 환경 node — happy-dom 도입 시 SearchOverlay, HomeButton, HoverTooltip 일괄 가능.
+- **호버 시각 효과 (Step 2 옵션 B/C)**: 호버 노드 펄스.
+- **chunk_id reset 휴리스틱 한계**: 빈 스캔 (0 노드) → 0 청크 1개만 도착하는 케이스에서 단조 검증 무력화. 명시적 reset API 가 더 안전 (M9+ 카드).
+- **모바일/터치 인터랙션**: 핀치 줌, 두 손가락 회전, 더블탭 fly-to. PointerEvents 는 이미 지원.
+- **빌드/배포 (인스톨러)**: `tauri build` + 코드사인 + Windows MSI / macOS dmg 자동화.
 
 ### 사전 정리된 결정 (재논의 X)
-- 좌표 알고리즘: Fractal Orbital Packing (Gemini Pro H 채택)
-- 거리 스케일: D1=100K / D2=10K / D3=1K / D4=100 / D5=10
-- 인스턴스 스케일: D0=5000 / D1=500 / D2=50 / D3=5 / D4=0.5 / D5+=0.05 (10× 비율)
-- Picking 방식: Color Buffer (Offscreen WebGLRenderTarget, 1×1)
-- 호버 throttle: rAF + Dirty Flag (lodash 금지)
-- 호버 UI: Screen Projected CSS 툴팁 (DOM, three.js 객체 X)
-- 메타데이터: 청크에 이미 있는 name 사용
-- 셰이더 P11 대체: `uTanHalfFov` uniform — setViewOffset 영향 받지 않게
+- 좌표 알고리즘: Fractal Orbital Packing
+- 거리 스케일: D1=100K / D2=10K / ... / D5=10
+- 인스턴스 스케일: D0=5000 / D1=500 / D2=50 / D3=5 / D4=0.5 / D5+=0.05
+- Picking: Color Buffer (Offscreen 1×1 RT)
+- 셰이더: `uTanHalfFov` (P11 대체) + `uMaxPixelRatio` (상한)
+- 호버 throttle: rAF + Dirty Flag
+- 호버 UI: Screen Projected CSS 툴팁
+- 카메라 애니메이션: 직접 lerp + rAF + easeInOutCubic, 800ms
+- 검색: substring (정규식/퍼지 X), Cmd/Ctrl+F, 좌측 사이드 패널
+- 매칭 시각: 금빛 (1.0, 0.85, 0.0) + 1.5×, 비매칭 (0.02, 0.02, 0.04), 호버 (1.0, 1.0, 1.0) + 2.0×
+- Auto-fit: AABB 대각구 + FOV 기반 distance, padding 1.1
+- 의존성 0 정책: gsap/TWEEN/lodash 모두 미도입
 
 ### 주의
 - 시각 검증 스크린샷은 사용자 직접 업로드
-- Logarithmic Depth Buffer 신뢰 (D5 결정) — 100K~10 스케일 차이도 z-fighting X
-- 메인/픽커 셰이더는 같은 `uTanHalfFov` 값을 공유해야 식 drift 0 — App.tsx 에서 한 번만 계산해 양쪽 주입
+- 메인/픽커 셰이더는 같은 `uTanHalfFov`, `uMaxPixelRatio` 값을 공유해야 식 drift 0 — App.tsx 에서 한 번만 계산해 양쪽 주입
+- CameraAnimator 가 OrbitControls.enabled 를 false 로 만들 때 CameraController 의 pan/wheel 핸들러도 같이 차단 (strict-false 체크)
+- `applyMatchHighlight` 는 O(count) per 호출 — 검색 매 keystroke 마다 발사되므로 10k+ 청크 시 성능 측정 필요 (M9+ 카드)
 
 ### 이슈 1 후속 (학습 정리, 미진행)
 - 노션에 "막힌 문제 카드" + 학습 노트 작성
@@ -49,3 +58,4 @@
   - cancelled 클로저 패턴이 표준 해법인 이유
   - sceneRef 가드만으로 무력화되는 경로 도식화
   - (M7-2 추가) `setViewOffset` 의 `projectionMatrix` 부작용 — picker 셰이더가 main 과 같은 P11 을 쓰면 결과가 어긋나는 함정
+  - (M8 추가) 직접 lerp + rAF 가 gsap 대비 의존성 0 으로 충분히 부드러운 이유 — 800ms × 144fps ≈ 115 프레임이라 easing 곡선이 시각적으로 매끄러움

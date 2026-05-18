@@ -59,6 +59,13 @@ export interface CameraControllerOptions {
    *   선택 해제 의도만 표현하는 zero-arg 콜백. App 이 store.selectNode(null) 등으로 와이어.
    */
   onEscClear?: () => void;
+  /**
+   * onDoubleClickPick — 더블 클릭 시 클라이언트 픽셀 좌표 전달 (M8 Step 1).
+   *   App 이 GPU Picker 로 instance 조회 후 CameraAnimator.start(fly-to) 호출 용도.
+   *   기본 click 픽(onPickPixel) 과 동시에 발사되며 — 단일 클릭 = selectNode, 더블 클릭 = fly-to
+   *   둘 다 트리거 되어도 사용자 경험상 자연스러움 (선택 + 비행).
+   */
+  onDoubleClickPick?: (clientX: number, clientY: number) => void;
 }
 
 /**
@@ -140,6 +147,9 @@ export class CameraController {
   private readonly onHoverPick: ((clientX: number, clientY: number) => void) | null;
   private readonly onHoverLeave: (() => void) | null;
   private readonly onEscClear: (() => void) | null;
+  private readonly onDoubleClickPick: ((clientX: number, clientY: number) => void) | null;
+  // 더블 클릭 listener — dispose 시 동일 참조로 removeEventListener.
+  private readonly onDoubleClick: (e: MouseEvent) => void;
 
   // (M7-2 Step 2) rAF + Dirty Flag 기반 hover throttle 상태.
   //   - hoverRafId: 다음 rAF 콜백의 ID. null = 미예약.
@@ -164,6 +174,8 @@ export class CameraController {
     this.onHoverPick = options?.onHoverPick ?? null;
     this.onHoverLeave = options?.onHoverLeave ?? null;
     this.onEscClear = options?.onEscClear ?? null;
+    this.onDoubleClickPick = options?.onDoubleClickPick ?? null;
+    this.onDoubleClick = (e) => this.handleDoubleClick(e);
 
     this.onMouseDown = (e) => this.handleMouseDown(e);
     this.onMouseMove = (e) => this.handleMouseMove(e);
@@ -188,6 +200,8 @@ export class CameraController {
     this.domElement.addEventListener("pointerleave", this.onPointerLeave);
     // wheel 도 canvas 위에서만. passive=false 여야 preventDefault() 로 페이지 스크롤 차단 가능.
     this.domElement.addEventListener("wheel", this.onWheel, { passive: false });
+    // (M8 Step 1) 더블 클릭 — native dblclick 이벤트 활용. 브라우저가 두 click 간격 자동 판정.
+    this.domElement.addEventListener("dblclick", this.onDoubleClick);
     // keydown 은 window 레벨 — canvas 가 포커스 대상이 아니기 때문.
     // HMR/unmount 시 dispose 에서 동일 참조로 remove 하여 리스너 누수 없음 (C2 패턴).
     window.addEventListener("keydown", this.onKeyDown);
@@ -226,7 +240,19 @@ export class CameraController {
     this.orbitControls.update();
   }
 
+  /**
+   * getOrbitControls() — CameraAnimator 등 외부 모듈이 target/enabled 를 만지기 위해 노출.
+   *   주의: 회전 입력 정책 (mouseButtons, dampingFactor) 은 CameraController 가 소유 —
+   *   외부에서 변경 시 충돌 가능. enabled 토글 + target lerp 정도만 권장.
+   */
+  getOrbitControls(): OrbitControls {
+    return this.orbitControls;
+  }
+
   private handleMouseDown(e: PointerEvent): void {
+    // (M8 Step 1) orbitControls.enabled === false 면 fly-to 등 애니메이션 중 — 사용자 입력 차단.
+    //   strict === false 체크: 테스트 mock 에서 enabled 미정의일 때 영향 없게.
+    if (this.orbitControls.enabled === false) return;
     if (e.button !== 0) return;
 
     // setPointerCapture: 이 포인터의 후속 이벤트(pointermove/up/cancel)가
@@ -408,9 +434,20 @@ export class CameraController {
    */
   private handleWheel(e: WheelEvent): void {
     e.preventDefault();
+    // (M8 Step 1) 애니메이션 중 휠 줌 차단 — 카메라 충돌 방지.
+    if (this.orbitControls.enabled === false) return;
     const factor = Math.pow(ZOOM_FACTOR_BASE, e.deltaY / ZOOM_DELTA_DIVISOR);
     const newZ = this.camera.position.z * factor;
     this.camera.position.z = THREE.MathUtils.clamp(newZ, MIN_ZOOM_Z, MAX_ZOOM_Z);
+  }
+
+  /**
+   * handleDoubleClick — native dblclick → onDoubleClickPick 콜백 (M8 Step 1).
+   *   더블 클릭 간격 판정은 브라우저에 위임 (대체로 500ms, 5px).
+   *   애니메이션 중 더블 클릭은 새 fly-to 로 시작 (CameraAnimator.start 가 이전 취소).
+   */
+  private handleDoubleClick(e: MouseEvent): void {
+    this.onDoubleClickPick?.(e.clientX, e.clientY);
   }
 
   /**
@@ -425,6 +462,7 @@ export class CameraController {
     this.domElement.removeEventListener("pointercancel", this.onPointerCancel);
     this.domElement.removeEventListener("pointerleave", this.onPointerLeave);
     this.domElement.removeEventListener("wheel", this.onWheel);
+    this.domElement.removeEventListener("dblclick", this.onDoubleClick);
     window.removeEventListener("keydown", this.onKeyDown);
 
     // (M7-2 Step 2) pending rAF 정리 — HMR / 더블 마운트 시 잔여 콜백이

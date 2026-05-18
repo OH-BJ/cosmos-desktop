@@ -34,6 +34,10 @@ const indexToId: string[] = [];
 //   필드가 없으므로 path 의 마지막 segment 를 폴백으로 사용.
 const indexToName: string[] = [];
 
+// (M8 Step 2) Buffer Index → 절대 경로 역매핑. 검색 결과 항목에 부제목으로 표시.
+//   syncFromStore → Node.path 그대로, appendChunkedNode → ScannedNode.path 사용.
+const indexToPath: string[] = [];
+
 /**
  * storeNodesBoundary — syncFromStore 가 마지막으로 채운 store 노드의 경계 인덱스.
  *
@@ -58,6 +62,11 @@ export function getIndexToId(): readonly string[] {
 /** (M7-2 Step 2) indexToName 배열 읽기 전용 접근. 호버 툴팁이 사용. */
 export function getIndexToName(): readonly string[] {
   return indexToName;
+}
+
+/** (M8 Step 2) indexToPath 배열 읽기 전용 접근. 검색 결과 표시 / 추후 노드 메타 조회. */
+export function getIndexToPath(): readonly string[] {
+  return indexToPath;
 }
 
 /** 현재 store-origin 노드 경계 (테스트용). 청크 노드 시작 인덱스 = 이 값. */
@@ -98,6 +107,7 @@ export function syncFromStore(nodes: Node[], buffer: NodeBuffer): void {
   idToIndex.clear();
   indexToId.length = 0;
   indexToName.length = 0;
+  indexToPath.length = 0;
 
   // 버퍼 초기화
   buffer.count = 0;
@@ -116,6 +126,8 @@ export function syncFromStore(nodes: Node[], buffer: NodeBuffer): void {
     // (M7-2 Step 2) Node 에 name 필드가 없어서 path 의 마지막 segment 를 폴백.
     //   "/test/node-a" → "node-a". Windows 경로도 마지막 \ 이후를 take.
     indexToName.push(extractNameFromPath(node.path));
+    // (M8 Step 2) Node.path 그대로 — 검색 결과의 부제목 / 추후 메타 조회용.
+    indexToPath.push(node.path);
   }
 
   // M6-2 Step 3: store-origin 경계 갱신. 이후 appendChunkedNode 가 push 하는 항목은
@@ -141,10 +153,11 @@ export function clearChunkedNodes(buffer: NodeBuffer): number {
   const removed = indexToId.length - storeNodesBoundary;
   if (removed <= 0) return 0;
 
-  // 뒤에서부터 제거 (idToIndex / indexToName 동시). pop 은 O(1).
+  // 뒤에서부터 제거 (idToIndex / indexToName / indexToPath 동시). pop 은 O(1).
   while (indexToId.length > storeNodesBoundary) {
     const id = indexToId.pop()!;
     indexToName.pop();
+    indexToPath.pop();
     idToIndex.delete(id);
   }
   // buffer 잘라내기 — positions 의 stale Float32 는 남아있어도 count 가 줄어들면
@@ -177,7 +190,8 @@ export function appendChunkedNode(
   y: number,
   z: number,
   scale: number = 1,
-  name: string = id
+  name: string = id,
+  path: string = id
 ): number {
   // 중복 ID 방어 (이미 등록된 ID 는 인덱스 안정성 위해 무시).
   if (idToIndex.has(id)) {
@@ -195,6 +209,7 @@ export function appendChunkedNode(
   idToIndex.set(id, idx);
   indexToId.push(id);
   indexToName.push(name);
+  indexToPath.push(path);
   return idx;
 }
 

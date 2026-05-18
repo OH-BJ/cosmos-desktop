@@ -289,6 +289,211 @@ describe("InstancedNodes", () => {
     });
   });
 
+  describe("applyMatchHighlight (M8 Step 2 — 검색 dim/highlight)", () => {
+    it("matched=null → 모든 인스턴스 NORMAL(1,1,1) 색상", () => {
+      const nodes = new InstancedNodes(4);
+      const buffer = allocateNodeBuffer(4);
+      pushNode(buffer, 0, 0, 0, 500);
+      pushNode(buffer, 1, 0, 0, 50);
+      pushNode(buffer, 2, 0, 0, 5);
+      nodes.syncFromBuffer(buffer);
+
+      nodes.applyMatchHighlight(null);
+
+      const mesh = nodes.getMesh();
+      const c = new THREE.Color();
+      for (let i = 0; i < 3; i++) {
+        mesh.getColorAt(i, c);
+        expect(c.r).toBeCloseTo(1.0, 4);
+        expect(c.g).toBeCloseTo(1.0, 4);
+        expect(c.b).toBeCloseTo(1.0, 4);
+      }
+    });
+
+    it("matched=Set → 매칭은 강렬한 금빛, 나머지는 거의 안 보임 (UX 강화: 색상 콘트라스트 극대화)", () => {
+      const nodes = new InstancedNodes(4);
+      const buffer = allocateNodeBuffer(4);
+      pushNode(buffer, 0, 0, 0, 500);
+      pushNode(buffer, 1, 0, 0, 50);
+      pushNode(buffer, 2, 0, 0, 5);
+      nodes.syncFromBuffer(buffer);
+
+      // 1번만 매칭으로 marking.
+      nodes.applyMatchHighlight(new Set([1]));
+
+      const mesh = nodes.getMesh();
+      const c = new THREE.Color();
+      mesh.getColorAt(0, c);
+      // 0번 — DIMMED (0.02, 0.02, 0.04).
+      expect(c.r).toBeCloseTo(0.02, 4);
+      expect(c.b).toBeCloseTo(0.04, 4);
+
+      mesh.getColorAt(1, c);
+      // 1번 — MATCHED 금빛 (1.0, 0.85, 0.0).
+      expect(c.r).toBeCloseTo(1.0, 4);
+      expect(c.g).toBeCloseTo(0.85, 4);
+      expect(c.b).toBeCloseTo(0.0, 4);
+
+      mesh.getColorAt(2, c);
+      // 2번 — DIMMED.
+      expect(c.r).toBeCloseTo(0.02, 4);
+    });
+
+    it("(UX 강화) 매칭 별의 instanceMatrix scale 이 buffer.scales × 1.5 로 확대", () => {
+      const nodes = new InstancedNodes(4);
+      const buffer = allocateNodeBuffer(4);
+      pushNode(buffer, 10, 20, 30, 100); // 원본 scale 100
+      pushNode(buffer, 0, 0, 0, 50);
+      nodes.syncFromBuffer(buffer);
+
+      nodes.applyMatchHighlight(new Set([0]));
+
+      const mesh = nodes.getMesh();
+      const m = new THREE.Matrix4();
+      const p = new THREE.Vector3();
+      const q = new THREE.Quaternion();
+      const s = new THREE.Vector3();
+
+      mesh.getMatrixAt(0, m);
+      m.decompose(p, q, s);
+      // 매칭 → 100 × 1.5 = 150.
+      expect(s.x).toBeCloseTo(150, 3);
+      expect(p.x).toBeCloseTo(10, 3); // position 은 그대로.
+
+      mesh.getMatrixAt(1, m);
+      m.decompose(p, q, s);
+      // 비매칭 → 50 × 1.0 = 50.
+      expect(s.x).toBeCloseTo(50, 3);
+    });
+
+    it("(UX 강화) applyMatchHighlight(null) → 모든 instance scale 원본 복원", () => {
+      const nodes = new InstancedNodes(4);
+      const buffer = allocateNodeBuffer(4);
+      pushNode(buffer, 0, 0, 0, 100);
+      pushNode(buffer, 0, 0, 0, 50);
+      nodes.syncFromBuffer(buffer);
+
+      // 먼저 매칭 적용 → 일부 1.5×.
+      nodes.applyMatchHighlight(new Set([0]));
+      // 검색 해제 → 모두 원본 scale.
+      nodes.applyMatchHighlight(null);
+
+      const mesh = nodes.getMesh();
+      const m = new THREE.Matrix4();
+      const s = new THREE.Vector3();
+      mesh.getMatrixAt(0, m);
+      m.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+      expect(s.x).toBeCloseTo(100, 3);
+      mesh.getMatrixAt(1, m);
+      m.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+      expect(s.x).toBeCloseTo(50, 3);
+    });
+
+    it("(UX 강화) setHoveredInList(id) → LIST_HOVER 순수 흰빛 + scale 2.0×, 나머지 매칭 상태 유지", () => {
+      const nodes = new InstancedNodes(4);
+      const buffer = allocateNodeBuffer(4);
+      pushNode(buffer, 0, 0, 0, 100);
+      pushNode(buffer, 1, 0, 0, 100);
+      pushNode(buffer, 2, 0, 0, 100);
+      nodes.syncFromBuffer(buffer);
+
+      // 검색: 0번 매칭 — 0=MATCHED, 1=DIMMED, 2=DIMMED.
+      nodes.applyMatchHighlight(new Set([0]));
+      // 2번 호버 → 2번이 LIST_HOVER. 0번/1번 상태 변화 X.
+      nodes.setHoveredInList(2);
+
+      const mesh = nodes.getMesh();
+      const c = new THREE.Color();
+      const m = new THREE.Matrix4();
+      const s = new THREE.Vector3();
+
+      mesh.getColorAt(0, c);
+      expect(c.r).toBeCloseTo(1.0, 4); // MATCHED 금빛 유지
+      expect(c.g).toBeCloseTo(0.85, 4);
+      expect(c.b).toBeCloseTo(0.0, 4);
+      mesh.getMatrixAt(0, m);
+      m.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+      expect(s.x).toBeCloseTo(150, 3); // 매칭 1.5×
+
+      mesh.getColorAt(2, c);
+      // LIST_HOVER (1.0, 1.0, 1.0).
+      expect(c.r).toBeCloseTo(1.0, 4);
+      expect(c.g).toBeCloseTo(1.0, 4);
+      expect(c.b).toBeCloseTo(1.0, 4);
+      mesh.getMatrixAt(2, m);
+      m.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+      expect(s.x).toBeCloseTo(200, 3); // 호버 2.0× (100 × 2.0)
+    });
+
+    it("(UX 강화) setHoveredInList(null) → 이전 호버 인덱스 색상 + scale 모두 복원", () => {
+      const nodes = new InstancedNodes(4);
+      const buffer = allocateNodeBuffer(4);
+      pushNode(buffer, 0, 0, 0, 100);
+      pushNode(buffer, 1, 0, 0, 100);
+      nodes.syncFromBuffer(buffer);
+
+      nodes.applyMatchHighlight(new Set([0]));
+      nodes.setHoveredInList(1); // 비매칭 1번 호버 → 흰빛 + 2.0×.
+      nodes.setHoveredInList(null); // 해제 → 1번은 다시 DIMMED + 1.0×.
+
+      const mesh = nodes.getMesh();
+      const c = new THREE.Color();
+      const m = new THREE.Matrix4();
+      const s = new THREE.Vector3();
+      mesh.getColorAt(1, c);
+      expect(c.r).toBeCloseTo(0.02, 4);
+      expect(c.b).toBeCloseTo(0.04, 4);
+      mesh.getMatrixAt(1, m);
+      m.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+      expect(s.x).toBeCloseTo(100, 3); // DIMMED = 1.0× → 원본 100.
+    });
+
+    it("(UX 강화) applyMatchHighlight 재호출 시 이전 hoveredInListIndex 자동 무효화 (색상 + scale)", () => {
+      const nodes = new InstancedNodes(4);
+      const buffer = allocateNodeBuffer(4);
+      pushNode(buffer, 0, 0, 0, 100);
+      pushNode(buffer, 1, 0, 0, 100);
+      nodes.syncFromBuffer(buffer);
+
+      nodes.applyMatchHighlight(new Set([0]));
+      nodes.setHoveredInList(0); // 0번 LIST_HOVER + 2.0×.
+
+      // 검색 변경 — 새 매칭 셋. 이전 hover 흔적 없어야 한다.
+      nodes.applyMatchHighlight(new Set([1]));
+      const mesh = nodes.getMesh();
+      const c = new THREE.Color();
+      const m = new THREE.Matrix4();
+      const s = new THREE.Vector3();
+      mesh.getColorAt(0, c);
+      expect(c.r).toBeCloseTo(0.02, 4); // 새 DIMMED.
+      mesh.getMatrixAt(0, m);
+      m.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+      expect(s.x).toBeCloseTo(100, 3); // 1.0× (호버 해제됨).
+      mesh.getMatrixAt(1, m);
+      m.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+      expect(s.x).toBeCloseTo(150, 3); // 새 MATCHED 1.5×.
+    });
+
+    it("matched=빈 Set → 모두 NORMAL 로 복원 (검색 0건이 화면 가리는 부작용 방지)", () => {
+      const nodes = new InstancedNodes(4);
+      const buffer = allocateNodeBuffer(4);
+      pushNode(buffer, 0, 0, 0, 1);
+      pushNode(buffer, 1, 0, 0, 1);
+      nodes.syncFromBuffer(buffer);
+
+      // 먼저 dim 시킨 뒤 빈 Set 호출.
+      nodes.applyMatchHighlight(new Set([0]));
+      nodes.applyMatchHighlight(new Set());
+
+      const mesh = nodes.getMesh();
+      const c = new THREE.Color();
+      mesh.getColorAt(0, c);
+      expect(c.r).toBeCloseTo(1.0, 4);
+      mesh.getColorAt(1, c);
+      expect(c.r).toBeCloseTo(1.0, 4);
+    });
+  });
+
   describe("Depth-Aware instance scale (D15)", () => {
     it("buffer.scales[i] 가 instanceMatrix 의 uniform scale 로 compose 됨", () => {
       const nodes = new InstancedNodes(4);

@@ -39,7 +39,7 @@ M7 (First Constellation) 직후 후보 3종:
 | Fly-to duration | **800 ms** (초기값) | 너무 길면 답답, 너무 짧으면 멀미. 시각 검증 후 조정 |
 | Orbit Lock 반경 | 대상 노드 `instanceScale × 5` | scale=500 → 2500 world units, scale=0.05 → 0.25 — 어느 깊이든 비례 |
 | 검색 매칭 | substring (대소문자 무시) | 정규식/퍼지 X, 단순함 우선 (M9+ 카드로 보관) |
-| 검색 UI | Spotlight 오버레이 (Cmd/Ctrl+K) | macOS Spotlight 패턴 — 이미 익숙, 모드 분리 명확 |
+| 검색 UI | Spotlight 오버레이 (Cmd/Ctrl+F) | macOS Spotlight 패턴 — 이미 익숙, 모드 분리 명확 |
 | Dimming opacity | 0.1 | 매칭 외 노드 흐릿하게, 완전 숨김은 X (별자리 형태 유지) |
 | Emissive | 단순 색상 변경 (흰색 or 살구색) | full PBR Emissive 미도입. 셰이더 uniform 한 줄 |
 | D5 과대화 해결 | **Max Pixel Size clamp** | 셰이더 상한 → D5 침투 시 폭발 방지. depth-aware scale 비율은 손대지 않음 (M7 결정 유지) |
@@ -137,7 +137,7 @@ const easeInOutCubic = (t: number) =>
 ### Step 2: 검색 + 시각 하이라이트
 
 #### 2-1. Spotlight UI — `src/ui/Spotlight.tsx`
-- Cmd/Ctrl+K 단축키로 토글.
+- Cmd/Ctrl+F 단축키로 토글.
 - 화면 중앙 상단에 둥근 입력창 (CSS: `position: fixed; top: 20%; left: 50%; transform: translateX(-50%);`).
 - 매칭 결과 리스트 (최대 10건) — 노드 이름 + 깊이 표시.
 - ↑/↓ 화살표 키 네비게이션, Enter 로 선택, Esc 로 닫기.
@@ -247,7 +247,7 @@ Step 0 (M7.5 부채) ─┐
 ## 사전 정리된 결정 (재논의 X) — 요약
 
 - 카메라 애니메이션: 직접 lerp + rAF, easeInOutCubic, 800ms
-- 검색: substring, 대소문자 무시, Cmd/Ctrl+K
+- 검색: substring, 대소문자 무시, Cmd/Ctrl+F
 - 하이라이트: Dimming 0.1 + Emissive 색상 변경
 - Auto-fit: 모든 노드 bbox + FOV 기반 거리, fly-to 로 부드럽게
 - D5 과대화: Max Pixel Size clamp (셰이더 상한)

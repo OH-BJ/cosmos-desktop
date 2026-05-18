@@ -4,6 +4,7 @@ import {
   getIdToIndex,
   getIndexToId,
   getIndexToName,
+  getIndexToPath,
   appendChunkedNode,
   clearChunkedNodes,
   getStoreNodesBoundary,
@@ -212,5 +213,27 @@ describe("indexToName (M7-2 Step 2 — 호버 툴팁 이름 매핑)", () => {
     // 청크 노드 절단 → indexToName 도 줄어야 한다 (id 매핑과 lockstep).
     clearChunkedNodes(buffer);
     expect(getIndexToName().length).toBe(0);
+  });
+
+  it("(M8 Step 2) indexToPath — syncFromStore 와 appendChunkedNode 둘 다 path 보관", () => {
+    const buffer = allocateNodeBuffer(8);
+    syncFromStore(
+      [
+        { id: "s1", path: "/store/alpha", x: 0, y: 0, z: 0 },
+        { id: "s2", path: "C:\\store\\beta.txt", x: 0, y: 0, z: 0 },
+      ],
+      buffer
+    );
+    expect(getIndexToPath()[0]).toBe("/store/alpha");
+    expect(getIndexToPath()[1]).toBe("C:\\store\\beta.txt");
+
+    // 청크가 store-origin 뒤에 추가됨.
+    appendChunkedNode(buffer, "u1", 0, 0, 0, 1, "gamma", "/chunk/gamma.bin");
+    expect(getIndexToPath()[2]).toBe("/chunk/gamma.bin");
+
+    // 청크 절단 시 store-origin path 만 유지.
+    clearChunkedNodes(buffer);
+    expect(getIndexToPath().length).toBe(2);
+    expect(getIndexToPath()[1]).toBe("C:\\store\\beta.txt");
   });
 });

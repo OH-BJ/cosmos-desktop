@@ -54,7 +54,9 @@ export function processNodeChunk(
     const scale = node.scale ?? 1;
     // (M7-2 Step 2) name 은 호버 툴팁이 사용. 없으면 id 폴백.
     const name = node.name ?? node.id;
-    const idx = appendChunkedNode(buffer, node.id, x, y, z, scale, name);
+    // (M8 Step 2) path 는 검색 결과 부제목 / 추후 메타 조회용. 없으면 id 폴백.
+    const path = node.path ?? node.id;
+    const idx = appendChunkedNode(buffer, node.id, x, y, z, scale, name, path);
     if (idx >= 0) appended++;
   }
   return appended;

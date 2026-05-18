@@ -199,6 +199,125 @@
   font-size: 11px;
 }
 
+/* M8 Step 3: HomeButton — 우상단 (stats 패널 아래) 작은 아이콘 버튼.
+   클릭 시 onAutoFit → AutoFit 계산 + 부드러운 fly-to. */
+.home-button {
+  position: absolute;
+  top: 56px; /* stats.js DOM(top=0) 아래로 살짝 */
+  right: 10px;
+  width: 36px;
+  height: 36px;
+  background-color: rgba(20, 20, 30, 0.85);
+  color: #fff;
+  border: 1px solid rgba(255, 200, 64, 0.35);
+  border-radius: 6px;
+  font-size: 20px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  cursor: pointer;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  transition: background-color 0.1s ease;
+}
+
+.home-button:hover {
+  background-color: rgba(255, 200, 64, 0.2);
+}
+
+.home-button:active {
+  background-color: rgba(255, 200, 64, 0.35);
+}
+
+/* M8 Step 2: SearchOverlay — 좌측 사이드 패널 (수정: 중앙 오버레이 → 좌측 패널).
+   이유: 중앙 오버레이가 검색 중 별 색상 변화(dim/highlight) 가림. 좌측으로 옮겨 캔버스
+   우측 ~1500px 가 항상 보이게. .search-overlay 가 컨테이너, __panel 이 실제 박스. */
+.search-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 360px;
+  height: 100vh;
+  z-index: 300;
+  /* 배경/딤 X — 패널 영역 자체만 차지. 우측 캔버스는 그대로 인터랙션 가능. */
+  pointer-events: none;
+}
+
+.search-overlay__panel {
+  /* 패널 자체는 부모 폭/높이를 그대로 가져감. pointer-events 재활성 — 입력/클릭 받기. */
+  width: 100%;
+  height: 100%;
+  background-color: rgba(20, 20, 30, 0.92);
+  border-right: 1px solid rgba(255, 200, 64, 0.35);
+  box-shadow: 4px 0 16px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  pointer-events: auto;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.search-overlay__input {
+  width: 100%;
+  background-color: transparent;
+  color: #fff;
+  border: none;
+  outline: none;
+  padding: 14px 18px;
+  font-size: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.search-overlay__input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.search-overlay__results {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  /* 좌측 패널 — 남는 세로 공간 전부 사용. flex 부모(panel) 가 column 이라 flex:1 로 확장. */
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+.search-overlay__result {
+  padding: 8px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+  color: #fff;
+  border-left: 2px solid transparent;
+}
+
+.search-overlay__result:hover {
+  background-color: rgba(255, 200, 64, 0.12);
+  border-left-color: rgba(255, 200, 64, 0.8);
+}
+
+.search-overlay__result-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.search-overlay__result-path {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  font-family: monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-overlay__empty {
+  margin: 0;
+  padding: 14px 18px;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 12px;
+}
+
 /* M7-2 Step 2: HoverTooltip — 호버 노드 이름을 노드 위에 띄우는 DOM 박스.
    left/top 은 JS 가 매 프레임 직접 설정. transform 은 마우스 위쪽으로 띄우기 위한 보정. */
 .hover-tooltip {

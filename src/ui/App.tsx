@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef } from "react";
+import * as THREE from "three";
 import Stats from "stats.js";
 import { Scene } from "../canvas/Scene";
 import { InstancedNodes } from "../canvas/nodes/InstancedNodes";
 import { CameraController } from "../canvas/CameraController";
+import { CameraAnimator } from "../canvas/CameraAnimator";
+import { computeFitView } from "../canvas/AutoFit";
 import { GPUPicker } from "../canvas/picking/GPUPicker";
 import { projectToScreen } from "../canvas/projection";
 import { useCosmosStore } from "../state/store";
@@ -12,6 +15,7 @@ import {
   getIndexToId,
   getIdToIndex,
   getIndexToName,
+  getIndexToPath,
   clearChunkedNodes,
 } from "../state/bridge";
 import { setupNodeDetailsSync } from "../state/nodeDetailsSync";
@@ -20,6 +24,8 @@ import { commands } from "../lib/bindings";
 import { NodeDetailsPanel } from "./NodeDetailsPanel";
 import { ScanControl } from "./ScanControl";
 import { HoverTooltip, type HoverTooltipProjection } from "./HoverTooltip";
+import { SearchOverlay } from "./SearchOverlay";
+import { HomeButton } from "./HomeButton";
 import "./App.css";
 
 /**
@@ -47,6 +53,8 @@ function App() {
   const cameraControllerRef = useRef<CameraController | null>(null);
   // M7-2 Step 1: Offscreen GPU Color Picker. Scene/Camera 와 라이프사이클 동기.
   const gpuPickerRef = useRef<GPUPicker | null>(null);
+  // M8 Step 1: Fly-to 카메라 애니메이션.
+  const cameraAnimatorRef = useRef<CameraAnimator | null>(null);
   // M6-2 Step 1: 디렉토리 스캔 청크 리스너 unsubscribe 보관.
   // setupNodeChunkSync 가 Promise<UnlistenFn> 을 반환하므로 .then 으로 ref 에 박는다.
   // cleanup 시점에 ref 가 null 이면 listen 이 아직 resolve 안 된 것 — 이 경우는 매우 드묾.
@@ -204,6 +212,12 @@ function App() {
         useCosmosStore
           .getState()
           .updateScanProgress(chunk.chunkId, chunk.totalScanned, chunk.isLast);
+
+        // (M8 Step 3) 스캔 완료 시 자동 fit — 별자리 전체를 화면에 부드럽게 정렬.
+        //   buffer.count 가 0 이면 computeFitView 가 null 반환해 silently skip.
+        if (chunk.isLast) {
+          runAutoFit();
+        }
       },
     })
       .then((unsub) => {
@@ -283,7 +297,42 @@ function App() {
         onHoverLeave: () => useCosmosStore.getState().setHoveredNode(null),
         // (M7.5 cleanup) ESC 선택 해제 — 기존 onPick(null) 대체.
         onEscClear: () => useCosmosStore.getState().selectNode(null),
+        // (M8 Step 1) 더블 클릭 → 노드 위치/스케일 조회 후 fly-to.
+        //   GPU Picker 미스 (-1) 면 무시. 실제 비행 계산은 flyToInstance 헬퍼 (Step 2 추출) 와 공유.
+        onDoubleClickPick: (clientX, clientY) => {
+          const instanceId = pickInstanceIdAt(clientX, clientY);
+          if (instanceId < 0) return;
+          // useCallback 으로 묶인 flyToInstance 는 effect 외부라 직접 호출 불가 (closure stale).
+          //   App 마운트 한 번이라 ref 들이 안정 — 인라인 동등 호출로 대체.
+          const buf = bufferRef.current;
+          const animator = cameraAnimatorRef.current;
+          if (!buf || !animator || instanceId >= buf.count) return;
+          const base = instanceId * 3;
+          const nodePos = new THREE.Vector3(
+            buf.positions[base],
+            buf.positions[base + 1],
+            buf.positions[base + 2]
+          );
+          const nodeScale = buf.scales[instanceId];
+          const cam = scene.getCamera();
+          const orbitRadius = Math.max(nodeScale * 5, 1.0);
+          const dir = new THREE.Vector3().subVectors(cam.position, nodePos);
+          if (dir.lengthSq() < 1e-6) dir.set(0, 0, 1);
+          dir.normalize();
+          animator.start({
+            fromPos: cam.position.clone(),
+            toPos: nodePos.clone().add(dir.multiplyScalar(orbitRadius)),
+            fromTarget: cameraControllerRef.current!.getOrbitControls().target.clone(),
+            toTarget: nodePos,
+          });
+        },
       }
+    );
+
+    // (M8 Step 1) CameraAnimator — CameraController 가 만든 OrbitControls 공유.
+    cameraAnimatorRef.current = new CameraAnimator(
+      scene.getCamera(),
+      cameraControllerRef.current.getOrbitControls()
     );
 
     // M4 Step 2: 선택 하이라이트 메시 구독 연결.
@@ -312,6 +361,12 @@ function App() {
       if (chunkUnsubRef.current) {
         chunkUnsubRef.current();
         chunkUnsubRef.current = null;
+      }
+      // (M8 Step 1) Animator pending rAF 정리. CameraController dispose 전에 해야
+      //   잔여 update() 가 곧 사라질 orbitControls 를 만지지 않게.
+      if (cameraAnimatorRef.current) {
+        cameraAnimatorRef.current.dispose();
+        cameraAnimatorRef.current = null;
       }
       // 카메라 컨트롤러 리스너 제거 (Scene.dispose 전이어야 domElement가 아직 살아있음)
       if (cameraControllerRef.current) {
@@ -459,6 +514,92 @@ function App() {
     return { screenX: proj.screenX, screenY: proj.screenY, name };
   }, []);
 
+  /**
+   * flyToInstance — Buffer Index 받아 CameraAnimator.start (M8 Step 2).
+   *   더블 클릭 핸들러 + SearchOverlay 결과 클릭 두 곳이 공유. fly-to 위치 계산 식 동일.
+   */
+  const flyToInstance = useCallback((instanceId: number) => {
+    const buf = bufferRef.current;
+    const scene = sceneRef.current;
+    const ctrl = cameraControllerRef.current;
+    const animator = cameraAnimatorRef.current;
+    if (!buf || !scene || !ctrl || !animator) return;
+    if (instanceId < 0 || instanceId >= buf.count) return;
+
+    const base = instanceId * 3;
+    const nodeX = buf.positions[base];
+    const nodeY = buf.positions[base + 1];
+    const nodeZ = buf.positions[base + 2];
+    const nodeScale = buf.scales[instanceId];
+
+    const cam = scene.getCamera();
+    const nodePos = new THREE.Vector3(nodeX, nodeY, nodeZ);
+    const orbitRadius = Math.max(nodeScale * 5, 1.0);
+    const dir = new THREE.Vector3().subVectors(cam.position, nodePos);
+    if (dir.lengthSq() < 1e-6) dir.set(0, 0, 1);
+    dir.normalize();
+    const toPos = nodePos.clone().add(dir.multiplyScalar(orbitRadius));
+
+    animator.start({
+      fromPos: cam.position.clone(),
+      toPos,
+      fromTarget: ctrl.getOrbitControls().target.clone(),
+      toTarget: nodePos,
+    });
+  }, []);
+
+  /**
+   * onMatchesChanged — SearchOverlay 가 매칭 결과 변경 시 호출 (M8 Step 2).
+   *   InstancedNodes 의 instanceColor 갱신 (NORMAL/DIMMED/MATCHED) — 1회 O(count).
+   */
+  const onMatchesChanged = useCallback(
+    (matched: ReadonlySet<number> | null) => {
+      instancedNodesRef.current?.applyMatchHighlight(matched);
+    },
+    []
+  );
+
+  /** (M8 Step 2 UX) SearchOverlay 결과 리스트 항목 호버 → InstancedNodes 발광. */
+  const onResultHover = useCallback((index: number | null) => {
+    instancedNodesRef.current?.setHoveredInList(index);
+  }, []);
+
+  /**
+   * runAutoFit — 전체 별자리 AABB 기반 카메라 적정 위치 산출 후 부드러운 fly-to (M8 Step 3).
+   *
+   *   스캔 완료 (isLast 청크) 자동 실행 + 우상단 홈 버튼 클릭이 공유.
+   *   buffer 가 비어 있으면 (스캔 전이거나 데모 노드 0개) silently skip.
+   */
+  const runAutoFit = useCallback(() => {
+    const buf = bufferRef.current;
+    const scene = sceneRef.current;
+    const ctrl = cameraControllerRef.current;
+    const animator = cameraAnimatorRef.current;
+    if (!buf || !scene || !ctrl || !animator) return;
+
+    const camera = scene.getCamera();
+    const fit = computeFitView(buf, camera);
+    if (!fit) return;
+
+    animator.start({
+      fromPos: camera.position.clone(),
+      toPos: fit.cameraPos,
+      fromTarget: ctrl.getOrbitControls().target.clone(),
+      toTarget: fit.target,
+    });
+  }, []);
+
+  /** SearchOverlay 가 호출하는 인덱스 → 노드 ID + UUID → store.selectNode + fly-to. */
+  const onSearchSelect = useCallback(
+    (instanceId: number) => {
+      // 선택 상태도 함께 갱신 — 메타패널이 자동 노출.
+      const uuid = getIndexToId()[instanceId] ?? null;
+      useCosmosStore.getState().selectNode(uuid);
+      flyToInstance(instanceId);
+    },
+    [flyToInstance]
+  );
+
   return (
     <div className="app-root">
       {/* three.js canvas가 이 div 안에 마운트됨 */}
@@ -481,9 +622,22 @@ function App() {
       {/* M6-2 Step 3: 좌측 하단 — 정식 스캔 트리거 패널 */}
       <ScanControl onStartScan={handleStartScan} />
 
+      {/* M8 Step 3: 우상단 — 전체 별자리 보기 (Auto-fit) 트리거 */}
+      <HomeButton onAutoFit={runAutoFit} />
+
       {/* M7-2 Step 2: 호버 시 노드 이름을 노드 위에 띄우는 DOM 툴팁.
           내부 rAF 가 getHoverProjection 을 매 프레임 호출해 카메라 이동에도 따라간다. */}
       <HoverTooltip getProjection={getHoverProjection} />
+
+      {/* M8 Step 2: Cmd/Ctrl+F Spotlight 검색 오버레이.
+          매칭 변경 시 InstancedNodes 가 dim/highlight. 결과 클릭 시 해당 노드로 fly-to. */}
+      <SearchOverlay
+        getNames={getIndexToName}
+        getPaths={getIndexToPath}
+        onSelectNode={onSearchSelect}
+        onMatchesChanged={onMatchesChanged}
+        onResultHover={onResultHover}
+      />
     </div>
   );
 }

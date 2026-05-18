@@ -21,6 +21,7 @@ vi.mock("three/examples/jsm/controls/OrbitControls.js", () => {
     ) {
       this.camera = camera;
       this.domElement = domElement;
+      this.enabled = true; // 실제 OrbitControls 와 일치 — CameraController 가 strict-false 체크
       this.enablePan = true;
       this.enableZoom = true;
       this.enableRotate = true;
@@ -403,6 +404,42 @@ describe("CameraController", () => {
         up({ button: 0, clientX: 1, clientY: 0 });
       }).not.toThrow();
     });
+
+    it("(M8 Step 1) 더블 클릭 → onDoubleClickPick(clientX, clientY) 호출", () => {
+      const onDoubleClickPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      new CameraController(cam, dom, { onDoubleClickPick });
+
+      const dbl = dom._listeners["dblclick"][0];
+      dbl({ clientX: 123, clientY: 456 });
+
+      expect(onDoubleClickPick).toHaveBeenCalledTimes(1);
+      expect(onDoubleClickPick).toHaveBeenCalledWith(123, 456);
+    });
+
+    it("(M8 Step 1) orbitControls.enabled=false 면 pan/wheel 모두 차단", () => {
+      const cam = createCamera();
+      const dom = createMockDom();
+      new CameraController(cam, dom);
+      const orbit = orbitInstances[0];
+      // 애니메이션 진입 모사 — enabled false 로 설정.
+      orbit.enabled = false;
+
+      const down = dom._listeners["pointerdown"][0];
+      const move = dom._listeners["pointermove"][0];
+      const wheel = dom._listeners["wheel"][0];
+
+      const initialZ = cam.position.z;
+      down({ button: 0, clientX: 0, clientY: 0 });
+      move({ clientX: 100, clientY: 0 });
+      // 드래그 시작 자체가 차단됨 → 카메라 x 변동 없음.
+      expect(cam.position.x).toBeCloseTo(0, 6);
+
+      wheel({ deltaY: 100, preventDefault: () => {} });
+      // 휠도 차단 → z 불변.
+      expect(cam.position.z).toBeCloseTo(initialZ, 6);
+    });
   });
 
   describe("ESC 키 선택 해제 (M4 Step 3 → M7.5 cleanup: onEscClear 분리)", () => {
@@ -572,6 +609,8 @@ describe("CameraController", () => {
       expect(dom._removed["wheel"]?.[0]).toBe(wheelRef);
       expect(dom._removed["pointermove"]?.[0]).toBe(mousemoveRef);
       expect(dom._removed["pointerup"]?.[0]).toBe(mouseupRef);
+      // (M8 Step 1) dblclick 리스너도 동일 참조로 제거.
+      expect(dom._removed["dblclick"]?.[0]).toBe(dom._listeners["dblclick"][0]);
       expect(oc.dispose).toHaveBeenCalledTimes(1);
 
       expect(dom.style.cursor).toBe("");

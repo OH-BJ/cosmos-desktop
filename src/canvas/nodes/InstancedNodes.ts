@@ -40,7 +40,28 @@ import { useCosmosStore } from "../../state/store";
 const BASE_RADIUS = 1.0;
 const MIN_PIXEL_SIZE = 4.0; // 최소 화면 지름 (px). 4×4 Hit-Area 보장 (Step 2 목표).
 
+// (M8 Step 2 UX 강화) 검색 하이라이트 색상 — 매칭/비매칭/호버 콘트라스트 극대화.
+//   MeshBasicMaterial.fragment 가 `diffuseColor *= vColor` 라 곱셈만으로 dim/bright 효과.
+const NORMAL_COLOR: readonly [number, number, number] = [1.0, 1.0, 1.0];
+const DIMMED_COLOR: readonly [number, number, number] = [0.02, 0.02, 0.04]; // 거의 안 보이는 검정
+const MATCHED_COLOR: readonly [number, number, number] = [1.0, 0.85, 0.0]; // 강렬한 금빛
+const LIST_HOVER_COLOR: readonly [number, number, number] = [1.0, 1.0, 1.0]; // 순수 흰빛
+
+// (M8 Step 2 UX 강화) 매칭/호버 시 instance scale 배율 — 크기로도 강조.
+//   buffer.scales[i] (원본) 는 손대지 않고 instanceMatrix 의 scale 만 임시 곱셈.
+//   상태 해제 시 1.0 으로 복원.
+const MATCHED_SCALE_MULT = 1.5; // 매칭 별 = 1.5×
+const LIST_HOVER_SCALE_MULT = 2.0; // 호버 별 = 2.0× (가장 큼)
+
 export class InstancedNodes {
+  // (M8 Step 2) applyMatchHighlight 가 매 호출마다 새 Color 객체를 만들지 않게 정적 재사용.
+  private static readonly _tmpColor = new THREE.Color();
+  // (M8 Step 2 UX) matrix.compose 재사용 객체 — 매 인스턴스마다 new 안 만들게.
+  private static readonly _tmpMatrix = new THREE.Matrix4();
+  private static readonly _tmpPos = new THREE.Vector3();
+  private static readonly _tmpQuat = new THREE.Quaternion();
+  private static readonly _tmpScale = new THREE.Vector3();
+
   private mesh: THREE.InstancedMesh;
   private capacity: number; // 최대 인스턴스 수 (생성자에서 고정)
   private material: THREE.MeshBasicMaterial;
@@ -69,6 +90,20 @@ export class InstancedNodes {
 
   // M4 Step 2: 선택 하이라이트 구독 해제 함수 (bindSelectionHighlight 가 반환).
   private highlightUnsub: (() => void) | null = null;
+
+  // (M8 Step 2 UX) 검색 상태 캐시 + 리스트 호버 인덱스.
+  //   applyMatchHighlight 가 currentMatched 갱신, setHoveredInList 가 hoveredInListIndex 갱신.
+  //   호버 해제 시 currentMatched 기준으로 원래 색상 + 크기 복원하기 위해 양쪽 캐시 필수.
+  private currentMatched: ReadonlySet<number> | null = null;
+  private hoveredInListIndex: number | null = null;
+
+  // (M8 Step 2 UX) 마지막으로 sync 한 NodeBuffer 참조 — 매칭/호버 시 matrix 재합성에 필요.
+  //   syncFromBuffer 가 매 호출마다 갱신. positions/scales 가 변하지 않는 한 안전.
+  private lastBuffer: NodeBuffer | null = null;
+
+  // (M8 Step 2 UX) M4 highlight mesh 새로고침 콜백 — 검색/호버 상태 변경 시
+  //   selected 노드의 highlight scale 도 따라 갱신하기 위해.
+  private highlightRefresh: (() => void) | null = null;
 
   /**
    * @param capacity 최대 인스턴스 수 (NodeBuffer.capacity 와 맞추는 것이 안전).
@@ -218,27 +253,31 @@ gl_Position = projectionMatrix * mvPosition;
     const rawStart = options?.startIndex ?? 0;
     const startIndex = Math.max(0, Math.min(rawStart, renderCount));
 
-    // Matrix4 + Vector3/Quaternion 재사용해 GC 부담 최소화.
-    // setMatrixAt은 내부적으로 행렬을 복사하므로 매 인덱스마다 새 객체 불필요.
     // (D15) compose(position, rotation, scale) — uniform scale 로 instanceMatrix 합성.
     //   회전은 identity (변동 없음). scale 은 buffer.scales[i] 그대로.
-    const matrix = new THREE.Matrix4();
-    const tmpPos = new THREE.Vector3();
-    const tmpQuat = new THREE.Quaternion();
-    const tmpScale = new THREE.Vector3();
-
+    //   (M8 UX) 정적 tmp 재사용 — paintMatrixByMatchState 와 GC 부담 공유.
     for (let i = startIndex; i < renderCount; i++) {
       const base = i * 3; // stride 3
       const x = buffer.positions[base];
       const y = buffer.positions[base + 1];
       const z = buffer.positions[base + 2];
-      const s = buffer.scales[i];
+      // (M8 UX) 매칭/호버 상태가 활성이면 scale 배율 반영 — 검색 중에 청크가 추가되거나
+      //   재 sync 가 호출돼도 강조 잔재 안 깨지게.
+      const mult = this.computeStateMultiplier(i);
+      const s = buffer.scales[i] * mult;
 
-      tmpPos.set(x, y, z);
-      tmpScale.set(s, s, s);
-      matrix.compose(tmpPos, tmpQuat, tmpScale);
-      this.mesh.setMatrixAt(i, matrix);
+      InstancedNodes._tmpPos.set(x, y, z);
+      InstancedNodes._tmpScale.set(s, s, s);
+      InstancedNodes._tmpMatrix.compose(
+        InstancedNodes._tmpPos,
+        InstancedNodes._tmpQuat,
+        InstancedNodes._tmpScale
+      );
+      this.mesh.setMatrixAt(i, InstancedNodes._tmpMatrix);
     }
+
+    // 매칭/호버 색상 보정 시 lastBuffer 참조 필요 → 매 sync 마다 최신 버퍼 캐시.
+    this.lastBuffer = buffer;
 
     // M6-2 Step 2: 부분 GPU 업로드 등록.
     //   매 호출마다 updateRanges 를 비운 뒤, partial 인 경우에만 신규 range 만 등록.
@@ -265,6 +304,153 @@ gl_Position = projectionMatrix * mvPosition;
     //  - (history) M4 Step 1 에서는 Raycaster broad-phase 용도였지만 GPU Picker 가
     //    대체했고, 이제는 InstancedMesh 의 시야 컬링에만 사용.
     this.mesh.computeBoundingSphere();
+  }
+
+  /**
+   * applyMatchHighlight() — 검색 매칭 결과를 인스턴스 색상으로 시각화 (M8 Step 2).
+   *
+   * 동작:
+   *  - `matched === null`  → 검색 비활성. 모든 인스턴스 색상을 NORMAL (1,1,1) 으로 복원.
+   *  - `matched.size === 0` → 매칭 0건. 모두 NORMAL 로 복원 (dim 처리 X, 검색 0건이 화면을
+   *    가리는 부작용 회피).
+   *  - 그 외 → 매칭 인스턴스 = MATCHED 색상 (살구색), 나머지 = DIMMED (0.1 회색).
+   *
+   * 구현 메모:
+   *   three.js InstancedMesh 의 `setColorAt(i, color)` 가 `instanceColor` attribute 를
+   *   자동 생성/갱신. MeshBasicMaterial 의 fragment 는 `diffuseColor *= vColor` 이라
+   *   별도 셰이더 패치 없이 색상 곱셈만으로 dim/highlight 효과 발생.
+   *
+   *   비용: O(count) per 호출. 10k 노드 setColorAt 도 ms 단위 — 매 keystroke 호출 안전.
+   *
+   * @param matched 매칭된 인스턴스 ID 집합. null = 검색 비활성 (모두 NORMAL 로).
+   */
+  applyMatchHighlight(matched: ReadonlySet<number> | null): void {
+    // 검색 변경 시 리스트 호버 인덱스도 무효 — 매칭 셋이 바뀌면 그 이전 hover 의 색상
+    //   복원 기준이 어긋날 수 있으므로 안전하게 클리어.
+    this.currentMatched = matched;
+    this.hoveredInListIndex = null;
+
+    const count = this.mesh.count;
+    for (let i = 0; i < count; i++) {
+      this.paintInstanceByMatchState(i);
+      this.paintMatrixByMatchState(i);
+    }
+    // instanceColor 가 첫 setColorAt 에서 자동 생성되므로 그 이후엔 무조건 존재.
+    if (this.mesh.instanceColor) {
+      this.mesh.instanceColor.needsUpdate = true;
+    }
+    // (M8 UX) instanceMatrix 도 재업로드 — 매칭 별이 1.5× 로 커진 행렬 반영.
+    this.mesh.instanceMatrix.clearUpdateRanges();
+    this.mesh.instanceMatrix.needsUpdate = true;
+    // 선택된 노드가 매칭 상태일 경우 highlight 도 같이 확대 — refresh 콜백 호출.
+    this.highlightRefresh?.();
+  }
+
+  /**
+   * setHoveredInList() — SearchOverlay 결과 리스트 항목 호버 시 단일 노드 강조 (M8 Step 2 UX).
+   *
+   *   - 새 호버 진입: 이전 호버 인덱스를 원래 매칭 상태 색상으로 복원 + 새 인덱스에 LIST_HOVER 적용.
+   *   - 호버 이탈 (null): 이전 호버 인덱스만 원래 매칭 상태로 복원.
+   *   - 동일 인덱스 재호출은 no-op (불필요한 attribute 갱신 회피).
+   *
+   *   검색 비활성 (`currentMatched=null`) 상태에서도 호버 발광 자체는 동작 — 단,
+   *   다른 노드는 NORMAL 이라 콘트라스트가 약함. 보통은 검색 결과 리스트에서만 발생.
+   */
+  setHoveredInList(instanceId: number | null): void {
+    if (instanceId === this.hoveredInListIndex) return;
+
+    const prev = this.hoveredInListIndex;
+    // 새 인덱스를 먼저 set — paintMatrixByMatchState 가 computeStateMultiplier 로
+    //   "현재 호버 여부" 를 판단하기 위해 필요.
+    this.hoveredInListIndex = instanceId;
+
+    // 이전 호버 인덱스를 매칭 상태로 복원 (색상 + 크기).
+    if (prev !== null && prev < this.mesh.count) {
+      this.paintInstanceByMatchState(prev);
+      this.paintMatrixByMatchState(prev);
+    }
+
+    // 새 호버 인덱스 — LIST_HOVER 색상 + LIST_HOVER_SCALE_MULT 크기.
+    if (instanceId !== null && instanceId >= 0 && instanceId < this.mesh.count) {
+      InstancedNodes._tmpColor.setRGB(
+        LIST_HOVER_COLOR[0],
+        LIST_HOVER_COLOR[1],
+        LIST_HOVER_COLOR[2]
+      );
+      this.mesh.setColorAt(instanceId, InstancedNodes._tmpColor);
+      this.paintMatrixByMatchState(instanceId);
+    }
+
+    if (this.mesh.instanceColor) {
+      this.mesh.instanceColor.needsUpdate = true;
+    }
+    this.mesh.instanceMatrix.clearUpdateRanges();
+    this.mesh.instanceMatrix.needsUpdate = true;
+    // 선택된 노드가 호버 대상이면 highlight 도 LIST_HOVER 크기로 동행.
+    this.highlightRefresh?.();
+  }
+
+  /**
+   * paintInstanceByMatchState() — 단일 인스턴스를 현재 currentMatched 기준 색상으로 칠함.
+   *
+   *   NORMAL: 검색 비활성 또는 매칭 0건.
+   *   MATCHED: matched 에 포함.
+   *   DIMMED: matched 에 비포함.
+   *
+   *   needsUpdate 는 호출자가 묶어 1회만 set — 루프 안에서 setter 호출 시 불필요한 디스패치 방지.
+   */
+  private paintInstanceByMatchState(i: number): void {
+    const matched = this.currentMatched;
+    const noSearch = matched === null || matched.size === 0;
+    let rgb: readonly [number, number, number];
+    if (noSearch) rgb = NORMAL_COLOR;
+    else if (matched!.has(i)) rgb = MATCHED_COLOR;
+    else rgb = DIMMED_COLOR;
+    InstancedNodes._tmpColor.setRGB(rgb[0], rgb[1], rgb[2]);
+    this.mesh.setColorAt(i, InstancedNodes._tmpColor);
+  }
+
+  /**
+   * paintMatrixByMatchState — 단일 인스턴스의 matrix 를 매칭/호버 배율 반영해 갱신 (M8 UX).
+   *
+   *   buffer.scales[i] 원본은 손대지 않고 instanceMatrix 의 scale 만 임시 곱셈:
+   *     LIST_HOVER : ×2.0  (호버한 결과 리스트 항목)
+   *     MATCHED    : ×1.5  (검색 매칭된 별)
+   *     그 외       : ×1.0  (검색 비활성 또는 비매칭)
+   *
+   *   needsUpdate 는 호출자가 묶어 1회만 set — 루프 안에서 setter 호출 시 디스패치 폭주 방지.
+   *   lastBuffer 가 null (sync 이전) 이면 silently skip — paintInstanceByMatchState 와 분리된 안전 장치.
+   */
+  private paintMatrixByMatchState(i: number): void {
+    const buf = this.lastBuffer;
+    if (!buf) return;
+    const mult = this.computeStateMultiplier(i);
+    const base = i * 3;
+    const s = buf.scales[i] * mult;
+    InstancedNodes._tmpPos.set(
+      buf.positions[base],
+      buf.positions[base + 1],
+      buf.positions[base + 2]
+    );
+    InstancedNodes._tmpScale.set(s, s, s);
+    InstancedNodes._tmpMatrix.compose(
+      InstancedNodes._tmpPos,
+      InstancedNodes._tmpQuat,
+      InstancedNodes._tmpScale
+    );
+    this.mesh.setMatrixAt(i, InstancedNodes._tmpMatrix);
+  }
+
+  /**
+   * computeStateMultiplier — i 번째 인스턴스의 현재 scale 배율 결정.
+   *   hoveredInListIndex 최우선 → matched → 기본 1.0.
+   *   외부에서도 bindSelectionHighlight 가 highlight mesh 크기 동기에 사용.
+   */
+  private computeStateMultiplier(i: number): number {
+    if (i === this.hoveredInListIndex) return LIST_HOVER_SCALE_MULT;
+    const matched = this.currentMatched;
+    if (matched === null || matched.size === 0) return 1.0;
+    return matched.has(i) ? MATCHED_SCALE_MULT : 1.0;
   }
 
   /**
@@ -366,15 +552,21 @@ gl_Position = projectionMatrix * mvPosition;
       //   고정 반지름 highlight 가 D1 안에서 사라지고 D5 위에선 거대 wireframe 으로 보임.
       //   buffer.scales[index] 를 그대로 곱해 노드 크기에 맞춰 동행. (geometry 자체는
       //   Scene 의 SphereGeometry(6.5) 가 그대로지만 mesh.scale 로 외형 보정.)
+      // (M8 UX) 추가로 검색/호버 상태 배율도 반영 — 매칭 별이 1.5× 되면 highlight 도 1.5×.
       const instScale = buffer.scales[index];
-      // 6.5 (기존 geometry 반지름) × 0.2 → 단위 반지름 1.3 효과. 거기에 instScale 곱해
-      //   노드 반지름(=instScale, geometry 1) 대비 약 30% 더 큰 윤곽 유지.
-      highlightMesh.scale.setScalar(instScale * 0.2);
+      const mult = this.computeStateMultiplier(index);
+      // 6.5 (기존 geometry 반지름) × 0.2 → 단위 반지름 1.3 효과.
+      highlightMesh.scale.setScalar(instScale * mult * 0.2);
       highlightMesh.visible = true;
     };
 
     // 초기 동기화 (subscribe 는 "변경 시에만" 콜백 → 현재 상태 맞추려면 1회 수동 호출).
     update(useCosmosStore.getState().selectedNodeId);
+
+    // (M8 UX) applyMatchHighlight / setHoveredInList 가 호출할 외부 refresh 콜백.
+    //   selected 노드의 매칭/호버 상태 변경 시 highlight 크기도 같이 동기화.
+    this.highlightRefresh = () =>
+      update(useCosmosStore.getState().selectedNodeId);
 
     const unsub = useCosmosStore.subscribe(
       (state) => state.selectedNodeId,
@@ -413,6 +605,8 @@ gl_Position = projectionMatrix * mvPosition;
       this.highlightUnsub();
       this.highlightUnsub = null;
     }
+    // (M8 UX) refresh 콜백도 정리 — applyMatchHighlight 가 죽은 update 함수를 잡지 않게.
+    this.highlightRefresh = null;
     (this.mesh.geometry as THREE.BufferGeometry).dispose();
     (this.mesh.material as THREE.Material).dispose();
   }

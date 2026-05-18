@@ -61,6 +61,10 @@ export class InstancedNodes {
     uMinPixelSize: { value: number };
     uBaseRadius: { value: number };
     uTanHalfFov: { value: number };
+    // (M7.5 cleanup) Max Pixel Size clamp — D5 침투 시 화면 폭발 방지.
+    //   effective pixelDiameter = clamp(raw, uMinPixelSize, uResolution.y * uMaxPixelRatio).
+    //   기본 0.1 → 화면 H 의 10% 가 상한. Picker 와 동일 값 공유 필수 (시각/판정 일치).
+    uMaxPixelRatio: { value: number };
   };
 
   // M4 Step 2: 선택 하이라이트 구독 해제 함수 (bindSelectionHighlight 가 반환).
@@ -74,7 +78,11 @@ export class InstancedNodes {
    */
   constructor(
     capacity: number = 1024,
-    options?: { resolution?: [number, number]; tanHalfFov?: number }
+    options?: {
+      resolution?: [number, number];
+      tanHalfFov?: number;
+      maxPixelRatio?: number;
+    }
   ) {
     // Geometry: 기본 단위 구체 (반지름 1).
     //   실제 노드 크기는 instanceMatrix 의 uniform scale 이 결정 (D15 Depth-Aware).
@@ -86,11 +94,13 @@ export class InstancedNodes {
     // tanHalfFov 기본 = tan(50°/2) ≈ 0.4663 (Scene 의 fov=50° 와 일치).
     //   App 이 mount 시 camera.fov 에서 계산해 주입하는 것이 권장.
     const initTan = options?.tanHalfFov ?? Math.tan((50 * Math.PI) / 360);
+    const initMaxRatio = options?.maxPixelRatio ?? 0.1;
     this.uniforms = {
       uResolution: { value: new THREE.Vector2(initW, initH) },
       uMinPixelSize: { value: MIN_PIXEL_SIZE },
       uBaseRadius: { value: BASE_RADIUS },
       uTanHalfFov: { value: initTan },
+      uMaxPixelRatio: { value: initMaxRatio },
     };
 
     // Material: MeshBasicMaterial 베이스 + onBeforeCompile 패치.
@@ -110,6 +120,7 @@ export class InstancedNodes {
       shader.uniforms.uMinPixelSize = this.uniforms.uMinPixelSize;
       shader.uniforms.uBaseRadius = this.uniforms.uBaseRadius;
       shader.uniforms.uTanHalfFov = this.uniforms.uTanHalfFov;
+      shader.uniforms.uMaxPixelRatio = this.uniforms.uMaxPixelRatio;
 
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -118,7 +129,8 @@ export class InstancedNodes {
 uniform vec2 uResolution;
 uniform float uMinPixelSize;
 uniform float uBaseRadius;
-uniform float uTanHalfFov;`
+uniform float uTanHalfFov;
+uniform float uMaxPixelRatio;`
         )
         .replace(
           "#include <project_vertex>",
@@ -143,8 +155,12 @@ float _instanceScale = length(instanceMatrix[0].xyz);
 //   유효 반지름 = uBaseRadius × _instanceScale → D1=500, D2=50, ... 로 다양한 노드 크기.
 float _depth = max(-_centerView.z, 0.001);
 float _pixelDiameter = uBaseRadius * _instanceScale * (1.0 / uTanHalfFov) * uResolution.y / _depth;
-// 멀어서 4px 미만이면 scaleFactor>1 로 키움, 가까울 땐 1.0 으로 원본 크기 유지.
-float _scaleFactor = max(1.0, uMinPixelSize / _pixelDiameter);
+// (M7.5 cleanup) effective = clamp(pixelDiameter, min, max) — scaleFactor 로 환산.
+//   하한 uMinPixelSize: distant 노드 4px Hit-Area 보장.
+//   상한 uResolution.y * uMaxPixelRatio: D5 침투 시 화면 폭발 방지 (기본 H의 10%).
+float _maxPixel = uResolution.y * uMaxPixelRatio;
+float _effectivePixel = clamp(_pixelDiameter, uMinPixelSize, _maxPixel);
+float _scaleFactor = _effectivePixel / _pixelDiameter;
 
 // 중심 기준으로 vertex 오프셋을 view 공간에서 균등 스케일.
 //   mvPosition 변수명은 후속 청크 (<fog_vertex>, <worldpos_vertex>) 가 참조하므로 보존.
@@ -157,7 +173,7 @@ gl_Position = projectionMatrix * mvPosition;
     //   고유 key 로 program 캐시를 격리.  (uniforms 가 같은 GLSL 을 공유하므로 단일 키 OK.)
     //   D15 셰이더 변경 시 키 갱신 — 기존 cache 의 stale 프로그램 재사용 방지.
     this.material.customProgramCacheKey = () =>
-      "cosmos-instanced-size-attenuation-m7-2-tan-half-fov";
+      "cosmos-instanced-size-attenuation-m7-5-max-pixel-clamp";
 
     // InstancedMesh(geometry, material, capacity)
     this.mesh = new THREE.InstancedMesh(geometry, this.material, capacity);
@@ -242,17 +258,12 @@ gl_Position = projectionMatrix * mvPosition;
     // capacity가 아니라 renderCount로 설정해야 뒤에 남은 stale 데이터가 안 그려짐.
     this.mesh.count = renderCount;
 
-    // M4 Step 1 수정: Raycaster 는 InstancedMesh.boundingSphere 로 broad-phase 컬링을 한다.
-    //  - 이 sphere 는 모든 인스턴스 위치 + geometry 반지름을 감싼 구.
-    //  - 반드시 matrices 를 다 쓰고 count/needsUpdate 를 세팅한 "뒤"에 계산해야 한다.
-    //    그러지 않으면 (0,0,0) 주변의 작은 sphere 만 잡혀, 멀리 떨어진 노드 클릭 시
-    //    광선이 sphere 를 스치지 못해 intersects 가 항상 0 이 된다 (Gemini 자문).
-    //  - 비용은 O(count) 로 매우 작음 → 매 sync 마다 호출해도 무해.
-    //  - 부분 업데이트 시에도 신규 노드 위치가 sphere 바깥일 수 있어 항상 재계산.
-    //
-    // 주의 (M7-1 Step 2): boundingSphere 는 *원본* geometry 반지름 기준이라 화면 클램프된
-    //   distant 노드는 여전히 ray hit 가 어렵다. Raycaster 기반 클릭 정확도 문제는
-    //   M7-2 GPU Color Picking 에서 본격 해결.
+    // (M7.5 cleanup) Raycaster 폐기 후에도 boundingSphere 는 frustum culling 용으로 유지.
+    //  - 모든 인스턴스 위치 + geometry 반지름을 감싸는 구.
+    //  - 매 sync 마다 갱신해야 신규 노드가 시야 밖이라고 잘못 컬링되지 않는다.
+    //  - 비용 O(count) — 무시 가능.
+    //  - (history) M4 Step 1 에서는 Raycaster broad-phase 용도였지만 GPU Picker 가
+    //    대체했고, 이제는 InstancedMesh 의 시야 컬링에만 사용.
     this.mesh.computeBoundingSphere();
   }
 
@@ -278,6 +289,15 @@ gl_Position = projectionMatrix * mvPosition;
   }
 
   /**
+   * setMaxPixelRatio() — Max Pixel Size 상한 비율 갱신 (M7.5 cleanup).
+   *   `effectivePixel <= uResolution.y * value`. 기본 0.1.
+   *   GPUPicker 와 동일 값 공유 — App 이 한 번에 양쪽 주입.
+   */
+  setMaxPixelRatio(value: number): void {
+    this.uniforms.uMaxPixelRatio.value = value;
+  }
+
+  /**
    * getUniforms() — 셰이더 uniform 객체 노출 (테스트용).
    *
    * Resolution 갱신 / 초기값 검증 / pixelMinSize 정책 변경 같은 단위 테스트가
@@ -288,6 +308,7 @@ gl_Position = projectionMatrix * mvPosition;
     uMinPixelSize: { value: number };
     uBaseRadius: { value: number };
     uTanHalfFov: { value: number };
+    uMaxPixelRatio: { value: number };
   } {
     return this.uniforms;
   }

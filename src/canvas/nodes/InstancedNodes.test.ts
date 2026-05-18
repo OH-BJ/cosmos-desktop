@@ -252,6 +252,17 @@ describe("InstancedNodes", () => {
       expect(u.uTanHalfFov.value).toBeCloseTo(0.5);
     });
 
+    it("(M7.5) uMaxPixelRatio 기본 0.1 + options + setter 동작", () => {
+      const def = new InstancedNodes(4);
+      expect(def.getUniforms().uMaxPixelRatio.value).toBeCloseTo(0.1);
+
+      const nodes = new InstancedNodes(4, { maxPixelRatio: 0.25 });
+      const u = nodes.getUniforms();
+      expect(u.uMaxPixelRatio.value).toBeCloseTo(0.25);
+      nodes.setMaxPixelRatio(0.05);
+      expect(u.uMaxPixelRatio.value).toBeCloseTo(0.05);
+    });
+
     it("constructor options.resolution 이 uResolution 에 반영됨", () => {
       const nodes = new InstancedNodes(4, { resolution: [1920, 1080] });
       const u = nodes.getUniforms();
@@ -339,6 +350,9 @@ describe("InstancedNodes", () => {
       //   picker 의 setViewOffset 이 P11 을 부풀려도 영향받지 않게.
       expect(fakeShader.vertexShader).toContain("uTanHalfFov");
       expect(fakeShader.vertexShader).not.toMatch(/projectionMatrix\[1\]\[1\]/);
+      // (M7.5 cleanup) Max Pixel clamp — D5 침투 시 화면 폭발 방지.
+      expect(fakeShader.vertexShader).toContain("uMaxPixelRatio");
+      expect(fakeShader.vertexShader).toContain("clamp(_pixelDiameter");
     });
   });
 

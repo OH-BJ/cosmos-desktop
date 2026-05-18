@@ -113,18 +113,22 @@ function App() {
     //   이 값은 안전하게 setViewOffset 무관. 한 번만 계산해 두 곳에 동일 주입.
     const camFov = scene.getCamera().fov;
     const tanHalfFov = Math.tan((camFov * Math.PI) / 360);
+    // (M7.5 cleanup) Max Pixel Size 상한 비율 — 화면 H 의 10%. D5 침투 폭발 방지.
+    const maxPixelRatio = 0.1;
 
     const instancedNodes = new InstancedNodes(buffer.capacity, {
       resolution: [window.innerWidth, window.innerHeight],
       tanHalfFov,
+      maxPixelRatio,
     });
     instancedNodesRef.current = instancedNodes;
     scene.getScene().add(instancedNodes.getMesh());
 
-    // M7-2 Step 1: GPUPicker — 메인 셰이더와 동일 해상도/tanHalfFov 로 초기화 (식 일치 필수).
+    // M7-2 Step 1: GPUPicker — 메인 셰이더와 동일 해상도/tanHalfFov/maxPixelRatio 로 초기화.
     const gpuPicker = new GPUPicker({
       resolution: [window.innerWidth, window.innerHeight],
       tanHalfFov,
+      maxPixelRatio,
     });
     gpuPickerRef.current = gpuPicker;
 
@@ -253,8 +257,8 @@ function App() {
       scene.getCamera(),
       scene.getRenderer().domElement,
       {
-        onPick: (id) => useCosmosStore.getState().selectNode(id),
-        // M7-2 Step 1: GPU Picking 경로. Raycaster onPick 직후 호출 → selectNode 덮어쓰기.
+        // (M7.5 cleanup) Raycaster 경로 폐기 — 클릭 픽은 onPickPixel 단일.
+        //   instanceId -1 (miss) → selectNode(null) 로 빈 공간 클릭 처리.
         onPickPixel: (clientX, clientY) => {
           const instanceId = pickInstanceIdAt(clientX, clientY);
           if (instanceId < 0) {
@@ -277,11 +281,10 @@ function App() {
         },
         // M7-2 Step 2: 캔버스 벗어나면 호버 해제 — 잔재 툴팁 방지.
         onHoverLeave: () => useCosmosStore.getState().setHoveredNode(null),
+        // (M7.5 cleanup) ESC 선택 해제 — 기존 onPick(null) 대체.
+        onEscClear: () => useCosmosStore.getState().selectNode(null),
       }
     );
-    // 히트테스트 대상(InstancedMesh) + Buffer Index → UUID 역매핑 주입.
-    cameraControllerRef.current.setPickTarget(instancedNodes.getMesh());
-    cameraControllerRef.current.setIndexToIdResolver(getIndexToId);
 
     // M4 Step 2: 선택 하이라이트 메시 구독 연결.
     //  selectedNodeId 변화 시 Scene 의 highlightMesh 가 해당 노드 위치로 이동 + visible 토글.

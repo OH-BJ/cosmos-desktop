@@ -365,6 +365,45 @@ describe("setupNodeChunkSync", () => {
     expect(buffer.count).toBe(1);
   });
 
+  it("(M7.5) 두 번째 스캔에서 chunkId=0 이 다시 들어와도 '순서 어긋남' 경고 없음", async () => {
+    // heuristic: chunkId === 0 이면 lastChunkId 를 -1 로 리셋해 첫 청크와 동일 흐름.
+    //   두 번 연속 0,1 시퀀스를 발사해 둘 다 경고 없는지 확인.
+    let registeredHandler:
+      | ((event: { payload: NodeChunkEvent }) => void)
+      | null = null;
+    mockedListen.mockImplementationOnce(async (handler) => {
+      registeredHandler = handler;
+      return vi.fn();
+    });
+
+    const buffer = allocateNodeBuffer(32);
+    await setupNodeChunkSync(buffer);
+    expect(registeredHandler).not.toBeNull();
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // 첫 스캔: 0, 1 — 정상.
+      registeredHandler!({
+        payload: makeChunk(0, [{ id: "s1-a" }, { id: "s1-b" }], false),
+      });
+      registeredHandler!({
+        payload: makeChunk(1, [{ id: "s1-c" }], true),
+      });
+      // 두 번째 스캔: 0 (이전엔 expected 2, got 0 으로 경고 났던 케이스), 1.
+      registeredHandler!({
+        payload: makeChunk(0, [{ id: "s2-a" }, { id: "s2-b" }], false),
+      });
+      registeredHandler!({
+        payload: makeChunk(1, [{ id: "s2-c" }], true),
+      });
+
+      // 경고 0회 — heuristic 이 chunkId=0 을 새 시퀀스 시작으로 인식.
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it("listener 발화 → buffer append + onAfterChunk 호출", async () => {
     let registeredHandler:
       | ((event: { payload: NodeChunkEvent }) => void)

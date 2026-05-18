@@ -81,6 +81,23 @@ describe("GPUPicker", () => {
       picker.dispose();
     });
 
+    it("(M7.5) uMaxPixelRatio 기본 0.1 + options + setter + 셰이더 clamp 식", () => {
+      const def = new GPUPicker();
+      expect(def.getUniforms().uMaxPixelRatio.value).toBeCloseTo(0.1);
+      // 셰이더가 clamp + maxPixel 도입했는지 — 메인 셰이더와 동일 식 보장.
+      expect(def.getMaterial().vertexShader).toContain("uMaxPixelRatio");
+      expect(def.getMaterial().vertexShader).toContain("clamp(pixelDiameter");
+      def.dispose();
+
+      const picker = new GPUPicker({ maxPixelRatio: 0.2 });
+      const u = picker.getUniforms();
+      expect(u.uMaxPixelRatio.value).toBeCloseTo(0.2);
+      picker.setMaxPixelRatio(0.05);
+      expect(u.uMaxPixelRatio.value).toBeCloseTo(0.05);
+      expect(picker.getMaterial().uniforms.uMaxPixelRatio).toBe(u.uMaxPixelRatio);
+      picker.dispose();
+    });
+
     it("setResolution 이 외부 uniforms 객체에 반영 (메인 셰이더와 동일 패턴)", () => {
       const picker = new GPUPicker({ resolution: [800, 600] });
       const u = picker.getUniforms();

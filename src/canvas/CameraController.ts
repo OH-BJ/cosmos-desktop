@@ -30,17 +30,14 @@ const CLICK_DISTANCE_THRESHOLD = 5;
 /**
  * CameraController 생성자 옵션.
  *
- * onPick: 노드가 클릭되어 hit 되면 해당 UUID, 빈 공간 클릭 시 null.
- *   Zustand 의 selectNode 를 직접 들이받지 않고 콜백으로 위임해
- *   CameraController 를 store 구현에서 독립시킨다 (테스트 용이성).
+ * (M7.5 cleanup) Raycaster 폐기 — onPick(UUID/null) 콜백 제거.
+ *   클릭 픽은 onPickPixel + GPU Picker 가 전담. 빈 공간 클릭은 App 측에서
+ *   GPU Picker 반환 -1 을 감지해 selectNode(null) 디스패치.
  */
 export interface CameraControllerOptions {
-  onPick?: (nodeId: string | null) => void;
   /**
    * onPickPixel — 클릭(드래그 아님) 발생 시 클라이언트 픽셀 좌표를 그대로 전달 (M7-2 Step 1).
-   *   App 이 GPUPicker.pickAtScreen 을 호출하기 위한 hook. onPick(raycaster) 직후에 호출되므로
-   *   같은 click 에서 두 경로가 모두 동작하고, App 측에서 GPU 결과를 selectNode 로 덮어쓸 수 있음.
-   *   기존 Raycaster 경로 폐기 결정은 Step 3 에서.
+   *   App 이 GPUPicker.pickAtScreen 을 호출하기 위한 hook. selectNode 디스패치는 App 책임.
    */
   onPickPixel?: (clientX: number, clientY: number) => void;
   /**
@@ -57,6 +54,11 @@ export interface CameraControllerOptions {
    * onHoverLeave — 마우스가 캔버스를 벗어났을 때 (pointerleave) 호출. 호버 상태 클리어용.
    */
   onHoverLeave?: () => void;
+  /**
+   * onEscClear — ESC 키다운 시 호출 (M7.5 cleanup, M4 의 onPick(null) 후속).
+   *   선택 해제 의도만 표현하는 zero-arg 콜백. App 이 store.selectNode(null) 등으로 와이어.
+   */
+  onEscClear?: () => void;
 }
 
 /**
@@ -132,14 +134,12 @@ export class CameraController {
 
   private readonly orbitControls: OrbitControls;
 
-  // 히트테스트용. Raycaster 는 재사용 가능(stateful 하지 않음) → 멤버로 하나만 보관.
-  private readonly raycaster: THREE.Raycaster;
-  private pickTarget: THREE.Object3D | null = null;
-  private indexToIdResolver: (() => readonly string[]) | null = null;
-  private readonly onPick: ((nodeId: string | null) => void) | null;
+  // (M7.5 cleanup) Raycaster 멤버 제거. GPU Picker 가 클릭/호버 픽 전담.
+  //   boundingSphere 갱신은 frustum culling 용으로 InstancedNodes 에서 계속 유지.
   private readonly onPickPixel: ((clientX: number, clientY: number) => void) | null;
   private readonly onHoverPick: ((clientX: number, clientY: number) => void) | null;
   private readonly onHoverLeave: (() => void) | null;
+  private readonly onEscClear: (() => void) | null;
 
   // (M7-2 Step 2) rAF + Dirty Flag 기반 hover throttle 상태.
   //   - hoverRafId: 다음 rAF 콜백의 ID. null = 미예약.
@@ -160,11 +160,10 @@ export class CameraController {
   ) {
     this.camera = camera;
     this.domElement = domElement;
-    this.onPick = options?.onPick ?? null;
     this.onPickPixel = options?.onPickPixel ?? null;
     this.onHoverPick = options?.onHoverPick ?? null;
     this.onHoverLeave = options?.onHoverLeave ?? null;
-    this.raycaster = new THREE.Raycaster();
+    this.onEscClear = options?.onEscClear ?? null;
 
     this.onMouseDown = (e) => this.handleMouseDown(e);
     this.onMouseMove = (e) => this.handleMouseMove(e);
@@ -225,24 +224,6 @@ export class CameraController {
    */
   update(): void {
     this.orbitControls.update();
-  }
-
-  /**
-   * 히트테스트 대상 InstancedMesh 주입. 생성 이후 별도로 호출.
-   * Scene 초기화 순서상 CameraController 가 먼저 만들어지고 InstancedNodes 가
-   * 뒤따라오므로 생성자 파라미터가 아닌 setter 로 분리했다.
-   */
-  setPickTarget(mesh: THREE.Object3D | null): void {
-    this.pickTarget = mesh;
-  }
-
-  /**
-   * Buffer Index → UUID 역매핑 리졸버 주입.
-   * bridge.getIndexToId() 를 람다로 감싸 전달하면 매 클릭마다 최신 배열이 조회된다
-   * (store 가 변하면 bridge 내부 indexToId 도 갱신되므로 snapshot 금지).
-   */
-  setIndexToIdResolver(resolver: (() => readonly string[]) | null): void {
-    this.indexToIdResolver = resolver;
   }
 
   private handleMouseDown(e: PointerEvent): void {
@@ -338,10 +319,8 @@ export class CameraController {
         Math.abs(e.clientX - this.downClientX) +
         Math.abs(e.clientY - this.downClientY);
       if (totalDist < CLICK_DISTANCE_THRESHOLD) {
-        if (this.onPick) {
-          this.performPick(e.clientX, e.clientY);
-        }
-        // M7-2 Step 1: GPU Picking 경로. Raycaster 결과를 덮어쓰는 식으로 동작 (마지막 디스패치가 이김).
+        // (M7.5 cleanup) Raycaster 경로 제거 — GPU Picker 단일.
+        //   픽 결과(또는 -1 miss)는 App 의 onPickPixel 핸들러가 selectNode 디스패치.
         if (this.onPickPixel) {
           this.onPickPixel(e.clientX, e.clientY);
         }
@@ -366,66 +345,15 @@ export class CameraController {
   }
 
   /**
-   * performPick — Raycaster 로 instancedMesh 히트테스트 → UUID 역변환 → onPick 호출.
-   *
-   * NDC 좌표는 domElement(canvas) 의 getBoundingClientRect 를 기준으로 계산한다.
-   * 캔버스가 뷰포트 전체를 덮는 경우에도 left/top 이 0 이라 clientX/Y 와 동일하지만,
-   * 패널 같은 오프셋이 생기는 경우를 대비해 일반화.
-   *
-   * hit 이 있으면 intersects[0].instanceId → indexToId[i] 로 UUID 획득.
-   * hit 이 없거나 instanceId 가 없으면 null (빈 공간 클릭 = 선택 해제).
-   */
-  private performPick(clientX: number, clientY: number): void {
-    if (!this.onPick) return;
-    if (!this.pickTarget) {
-      this.onPick(null);
-      return;
-    }
-
-    const rect =
-      typeof this.domElement.getBoundingClientRect === "function"
-        ? this.domElement.getBoundingClientRect()
-        : ({ left: 0, top: 0 } as DOMRect);
-    const cw = this.domElement.clientWidth || 1;
-    const ch = this.domElement.clientHeight || 1;
-
-    const localX = clientX - rect.left;
-    const localY = clientY - rect.top;
-    const ndcX = (localX / cw) * 2 - 1;
-    const ndcY = -(localY / ch) * 2 + 1;
-
-    // matrixWorld/boundingSphere 갱신 책임은 InstancedNodes.syncFromBuffer 에 있다.
-    // 여기서는 순수하게 NDC → Ray → intersect 만 수행.
-    const ndc = new THREE.Vector2(ndcX, ndcY);
-    this.raycaster.setFromCamera(ndc, this.camera);
-
-    const intersects = this.raycaster.intersectObject(this.pickTarget, false);
-    const first = intersects[0];
-    if (first && first.instanceId !== undefined && this.indexToIdResolver) {
-      const id = this.indexToIdResolver()[first.instanceId] ?? null;
-      this.onPick(id);
-    } else {
-      this.onPick(null);
-    }
-  }
-
-  /**
-   * handleKeyDown — ESC 로 선택 해제 (M4 Step 3).
-   *
-   * 빈 공간 클릭과 의미적으로 동일 (선택된 노드 없음) → onPick(null) 재사용.
-   * 별도 콜백을 두면 App 레이어에서 같은 selectNode(null) 을 두 번 배선해야 해
-   * 불필요한 표면적이 늘어난다.
+   * handleKeyDown — ESC 로 선택 해제 (M4 Step 3 → M7.5 cleanup 후 onEscClear 로 분리).
    *
    * 주의:
-   *  - preventDefault 는 호출하지 않는다. ESC 의 기본 동작(전체화면 해제 등)을
-   *    빼앗지 않기 위해서. 리스너는 리스닝만 하고, store 갱신은 onPick 으로 위임.
-   *  - e.key === "Escape" 는 모든 모던 브라우저에서 IE legacy "Esc" 와 분리된 표준 값.
+   *  - preventDefault 는 호출하지 않는다. ESC 의 기본 동작(전체화면 해제 등)을 빼앗지 않음.
+   *  - e.key === "Escape" 는 모던 브라우저 표준 값.
    */
   private handleKeyDown(e: KeyboardEvent): void {
     if (e.key !== "Escape") return;
-    if (this.onPick) {
-      this.onPick(null);
-    }
+    this.onEscClear?.();
   }
 
   /**

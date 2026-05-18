@@ -74,6 +74,11 @@ export interface GPUPickerOptions {
    *   기본 = tan(50°/2) (Scene fov=50° 일치).
    */
   tanHalfFov?: number;
+  /**
+   * (M7.5 cleanup) Max Pixel Size 상한 비율 — 메인 셰이더와 동일 값 공유 필수.
+   *   기본 0.1 (화면 H 의 10%).
+   */
+  maxPixelRatio?: number;
 }
 
 export class GPUPicker {
@@ -87,6 +92,7 @@ export class GPUPicker {
     uMinPixelSize: { value: number };
     uBaseRadius: { value: number };
     uTanHalfFov: { value: number };
+    uMaxPixelRatio: { value: number };
   };
 
   constructor(options?: GPUPickerOptions) {
@@ -94,11 +100,13 @@ export class GPUPicker {
     // tanHalfFov 기본 = tan(50°/2) — Scene fov=50° 와 일치. App 이 카메라 인스턴스에서
     //   계산해 InstancedNodes 와 같은 값을 주입하는 것이 권장 (식 drift 방지).
     const initTan = options?.tanHalfFov ?? Math.tan((50 * Math.PI) / 360);
+    const initMaxRatio = options?.maxPixelRatio ?? 0.1;
     this.uniforms = {
       uResolution: { value: new THREE.Vector2(w, h) },
       uMinPixelSize: { value: options?.minPixelSize ?? 4.0 },
       uBaseRadius: { value: options?.baseRadius ?? 1.0 },
       uTanHalfFov: { value: initTan },
+      uMaxPixelRatio: { value: initMaxRatio },
     };
 
     // 1×1 RT — NearestFilter 로 보간 차단 (정수 색 보존), UnsignedByte/RGBA 가 readPixels 표준.
@@ -120,12 +128,14 @@ export class GPUPicker {
         uMinPixelSize: this.uniforms.uMinPixelSize,
         uBaseRadius: this.uniforms.uBaseRadius,
         uTanHalfFov: this.uniforms.uTanHalfFov,
+        uMaxPixelRatio: this.uniforms.uMaxPixelRatio,
       },
       vertexShader: `
         uniform vec2 uResolution;
         uniform float uMinPixelSize;
         uniform float uBaseRadius;
         uniform float uTanHalfFov;
+        uniform float uMaxPixelRatio;
         varying vec3 vPickColor;
 
         void main() {
@@ -147,7 +157,10 @@ export class GPUPicker {
           //   P11 을 ~H 배 부풀려 pixelDiameter 폭증 → 4px 클램프 비활성 → 작은 노드 미발사.
           //   1/uTanHalfFov 는 setViewOffset 무관 (fov 만 의존) 이라 안전.
           float pixelDiameter = uBaseRadius * instanceScale * (1.0 / uTanHalfFov) * uResolution.y / depth;
-          float scaleFactor = max(1.0, uMinPixelSize / pixelDiameter);
+          // (M7.5 cleanup) effective = clamp(pixelDiameter, min, max). 메인 셰이더와 동일.
+          float maxPixel = uResolution.y * uMaxPixelRatio;
+          float effectivePixel = clamp(pixelDiameter, uMinPixelSize, maxPixel);
+          float scaleFactor = effectivePixel / pixelDiameter;
 
           vec4 mvPosition = centerView + (vertexView - centerView) * scaleFactor;
           gl_Position = projectionMatrix * mvPosition;
@@ -186,6 +199,13 @@ export class GPUPicker {
    */
   setTanHalfFov(value: number): void {
     this.uniforms.uTanHalfFov.value = value;
+  }
+
+  /**
+   * setMaxPixelRatio() — Max Pixel 상한 비율 갱신. 메인 셰이더와 동일 값.
+   */
+  setMaxPixelRatio(value: number): void {
+    this.uniforms.uMaxPixelRatio.value = value;
   }
 
   /**
@@ -242,6 +262,7 @@ export class GPUPicker {
     uMinPixelSize: { value: number };
     uBaseRadius: { value: number };
     uTanHalfFov: { value: number };
+    uMaxPixelRatio: { value: number };
   } {
     return this.uniforms;
   }

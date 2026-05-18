@@ -86,6 +86,14 @@ export async function setupNodeChunkSync(
   const unsub = await events.nodeChunkEvent.listen((event) => {
     const chunk = event.payload;
 
+    // (M7.5 cleanup) 새 스캔 = backend task 재시작 = chunk_id 0 부터 다시 시작.
+    //   기존엔 lastChunkId 가 단조 증가 가정이라 두 번째 스캔부터 "순서 어긋남" 경고 발사.
+    //   heuristic: chunkId === 0 이면 새 시퀀스 시작으로 보고 lastChunkId 리셋.
+    //   첫 청크에서도 자연스럽게 동작 (initial -1 → 0 도 정상 순서).
+    if (chunk.chunkId === 0) {
+      lastChunkId = -1;
+    }
+
     // Rust 가 직렬 emit 하므로 0, 1, 2, ... 단조 증가가 정상.
     // 어긋난다면 multi-task 분할 도입 등 backend 변경 신호 → 경고만, 차단은 안 함.
     if (chunk.chunkId !== lastChunkId + 1) {

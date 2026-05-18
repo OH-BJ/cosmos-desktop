@@ -61,6 +61,16 @@ describe("pushNode", () => {
     pushNode(buf, 0, 0, 0);
     expect(() => pushNode(buf, 0, 0, 0)).toThrow(/overflow/);
   });
+
+  it("(D15) scale 인자 → buffer.scales[i] 에 저장, 미지정 시 기본 1", () => {
+    const buf = allocateNodeBuffer(4);
+    pushNode(buf, 0, 0, 0); // 기본 스케일
+    pushNode(buf, 1, 1, 1, 500); // D1
+    pushNode(buf, 2, 2, 2, 0.05); // D5
+    expect(buf.scales[0]).toBeCloseTo(1);
+    expect(buf.scales[1]).toBeCloseTo(500);
+    expect(buf.scales[2]).toBeCloseTo(0.05);
+  });
 });
 
 describe("setNodePosition", () => {

@@ -49,7 +49,12 @@ export function processNodeChunk(
   let appended = 0;
   for (const node of chunk.nodes) {
     const [x, y, z] = node.position;
-    const idx = appendChunkedNode(buffer, node.id, x, y, z);
+    // (D15) ScannedNode.scale 을 buffer 에 함께 기록. InstancedMesh 가 compose 단계에서
+    //   uniform scale 로 사용. scale 이 없는 (구버전 백엔드) 청크는 1 로 폴백.
+    const scale = node.scale ?? 1;
+    // (M7-2 Step 2) name 은 호버 툴팁이 사용. 없으면 id 폴백.
+    const name = node.name ?? node.id;
+    const idx = appendChunkedNode(buffer, node.id, x, y, z, scale, name);
     if (idx >= 0) appended++;
   }
   return appended;

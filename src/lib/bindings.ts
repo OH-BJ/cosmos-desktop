@@ -230,6 +230,9 @@ export type NodeKind = "file" | "directory" | "link" | "memo";
  *  - `position: [f32; 3]` — (M7-1 Step 1) Fractal Orbital Packing 으로 계산된
  *    3D 우주 좌표. Frontend 가 더 이상 random 폴백을 만들지 않고 그대로 사용.
  *    `f32` 인 이유: GPU 인스턴스 매트릭스가 `Float32Array` 라 어차피 다운캐스트됨.
+ *  - `scale: f32` — (D15 Depth-Aware) 깊이별 인스턴스 스케일. `coords::scale_for_depth(depth)`
+ *    결과를 그대로 저장. Frontend 가 InstancedMesh 의 instanceMatrix 에 uniform scale
+ *    로 합성. 균일 BASE_RADIUS 가 만들던 D3+ 노드 겹침 문제를 해결한다.
  */
 export type ScannedNode = {
 	id: string,
@@ -239,6 +242,7 @@ export type ScannedNode = {
 	sizeBytes: number,
 	depth: number,
 	position: [number, number, number],
+	scale: number,
 };
 
 /* Tauri Specta runtime */

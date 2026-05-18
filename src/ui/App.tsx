@@ -3,12 +3,15 @@ import Stats from "stats.js";
 import { Scene } from "../canvas/Scene";
 import { InstancedNodes } from "../canvas/nodes/InstancedNodes";
 import { CameraController } from "../canvas/CameraController";
+import { GPUPicker } from "../canvas/picking/GPUPicker";
+import { projectToScreen } from "../canvas/projection";
 import { useCosmosStore } from "../state/store";
 import { allocateNodeBuffer, NodeBuffer } from "../state/nodeBuffer";
 import {
   setupStoreSynchronization,
   getIndexToId,
   getIdToIndex,
+  getIndexToName,
   clearChunkedNodes,
 } from "../state/bridge";
 import { setupNodeDetailsSync } from "../state/nodeDetailsSync";
@@ -16,6 +19,7 @@ import { setupNodeChunkSync } from "../state/nodeChunkSync";
 import { commands } from "../lib/bindings";
 import { NodeDetailsPanel } from "./NodeDetailsPanel";
 import { ScanControl } from "./ScanControl";
+import { HoverTooltip, type HoverTooltipProjection } from "./HoverTooltip";
 import "./App.css";
 
 /**
@@ -41,6 +45,8 @@ function App() {
   const unsubRef = useRef<(() => void) | null>(null);
   // Step 2: 카메라 팬 컨트롤러. Scene 이 만든 canvas(renderer.domElement) 에 이벤트 바인딩.
   const cameraControllerRef = useRef<CameraController | null>(null);
+  // M7-2 Step 1: Offscreen GPU Color Picker. Scene/Camera 와 라이프사이클 동기.
+  const gpuPickerRef = useRef<GPUPicker | null>(null);
   // M6-2 Step 1: 디렉토리 스캔 청크 리스너 unsubscribe 보관.
   // setupNodeChunkSync 가 Promise<UnlistenFn> 을 반환하므로 .then 으로 ref 에 박는다.
   // cleanup 시점에 ref 가 null 이면 listen 이 아직 resolve 안 된 것 — 이 경우는 매우 드묾.
@@ -102,15 +108,33 @@ function App() {
     //    capacity를 buffer와 동일하게 맞춰야 syncFromBuffer에서 truncation이 없음.
     //    M7-1 Step 2: 초기 해상도 주입 — vertex shader 의 uResolution uniform 이
     //      픽셀 지름 클램프 계산에 H 를 쓰므로 mount 시점부터 정확한 값이 필요.
+    // (M7-2 Step 2 hotfix) tan(fov/2) — 메인/픽커 셰이더가 동일 값을 공유해야 식 drift 0.
+    //   pickAtScreen 의 camera.setViewOffset 은 projectionMatrix 만 부풀리지 fov 는 건들지 않으므로
+    //   이 값은 안전하게 setViewOffset 무관. 한 번만 계산해 두 곳에 동일 주입.
+    const camFov = scene.getCamera().fov;
+    const tanHalfFov = Math.tan((camFov * Math.PI) / 360);
+
     const instancedNodes = new InstancedNodes(buffer.capacity, {
       resolution: [window.innerWidth, window.innerHeight],
+      tanHalfFov,
     });
     instancedNodesRef.current = instancedNodes;
     scene.getScene().add(instancedNodes.getMesh());
 
+    // M7-2 Step 1: GPUPicker — 메인 셰이더와 동일 해상도/tanHalfFov 로 초기화 (식 일치 필수).
+    const gpuPicker = new GPUPicker({
+      resolution: [window.innerWidth, window.innerHeight],
+      tanHalfFov,
+    });
+    gpuPickerRef.current = gpuPicker;
+
     // M7-1 Step 2: resize 시 uResolution uniform 동기 갱신.
     //   Scene.handleResize 가 매번 이 콜백을 호출하므로 별도 window 리스너 추가 불필요.
-    scene.setResizeCallback((w, h) => instancedNodes.setResolution(w, h));
+    //   M7-2 Step 1: GPUPicker uniform 도 같이 갱신 (두 경로 식이 갈리면 시각/판정 어긋남).
+    scene.setResizeCallback((w, h) => {
+      instancedNodes.setResolution(w, h);
+      gpuPicker.setResolution(w, h);
+    });
 
     // 4) DOM 마운트 + 렌더 루프 시작
     scene.mount(containerRef.current);
@@ -203,11 +227,56 @@ function App() {
     //   store 갱신 책임은 App 계층이 갖는다 (의존성 역전).
     //   useCosmosStore.getState() 로 매번 최신 액션을 조회 — subscribe 로 훅을 쓰면
     //   렌더 루프 밖이라 React 경고가 날 수 있어 getState() 가 안전.
+    // (M7-2 Step 2) 클릭/호버 둘 다 GPU Picker 결과를 같은 식으로 디스패치 — 헬퍼로 공유.
+    //   localX/Y 계산은 동일하고, 결과 ID 를 selectNode / setHoveredNode 중 어디로 보낼지만 다름.
+    const pickInstanceIdAt = (clientX: number, clientY: number): number => {
+      const renderer = scene.getRenderer();
+      const camera = scene.getCamera();
+      const canvas = renderer.domElement;
+      const rect = canvas.getBoundingClientRect();
+      const localX = clientX - rect.left;
+      const localY = clientY - rect.top;
+      const cssW = canvas.clientWidth || 1;
+      const cssH = canvas.clientHeight || 1;
+      return gpuPicker.pickAtScreen(
+        renderer,
+        scene.getScene(),
+        camera,
+        localX,
+        localY,
+        cssW,
+        cssH
+      );
+    };
+
     cameraControllerRef.current = new CameraController(
       scene.getCamera(),
       scene.getRenderer().domElement,
       {
         onPick: (id) => useCosmosStore.getState().selectNode(id),
+        // M7-2 Step 1: GPU Picking 경로. Raycaster onPick 직후 호출 → selectNode 덮어쓰기.
+        onPickPixel: (clientX, clientY) => {
+          const instanceId = pickInstanceIdAt(clientX, clientY);
+          if (instanceId < 0) {
+            useCosmosStore.getState().selectNode(null);
+            return;
+          }
+          const uuid = getIndexToId()[instanceId] ?? null;
+          useCosmosStore.getState().selectNode(uuid);
+        },
+        // M7-2 Step 2: 호버 경로 — rAF + Dirty Flag throttle 후 한 프레임당 1회 호출됨.
+        //   GPU 픽 결과 ID 를 store.setHoveredNode 로 → HoverTooltip 이 표시.
+        onHoverPick: (clientX, clientY) => {
+          const instanceId = pickInstanceIdAt(clientX, clientY);
+          if (instanceId < 0) {
+            useCosmosStore.getState().setHoveredNode(null);
+            return;
+          }
+          const uuid = getIndexToId()[instanceId] ?? null;
+          useCosmosStore.getState().setHoveredNode(uuid);
+        },
+        // M7-2 Step 2: 캔버스 벗어나면 호버 해제 — 잔재 툴팁 방지.
+        onHoverLeave: () => useCosmosStore.getState().setHoveredNode(null),
       }
     );
     // 히트테스트 대상(InstancedMesh) + Buffer Index → UUID 역매핑 주입.
@@ -253,6 +322,11 @@ function App() {
       if (instancedNodesRef.current) {
         instancedNodesRef.current.dispose();
         instancedNodesRef.current = null;
+      }
+      // M7-2 Step 1: GPUPicker GPU 리소스 (RT + material) 해제.
+      if (gpuPickerRef.current) {
+        gpuPickerRef.current.dispose();
+        gpuPickerRef.current = null;
       }
       // M6-2 Step 2: Stats DOM 제거 (StrictMode 더블 마운트 시 두 개가 겹쳐 보이는 것 방지).
       if (stats && stats.dom.parentElement) {
@@ -350,6 +424,38 @@ function App() {
     };
   }, []);
 
+  /**
+   * getHoverProjection — 현재 호버된 노드의 화면 좌표 + 이름 계산 (M7-2 Step 2).
+   *
+   * HoverTooltip 이 rAF 마다 호출. Scene/Buffer/bridge 매핑에 대한 클로저로
+   *   HoverTooltip 컴포넌트 자체가 three.js 를 직접 알지 않게 격리.
+   *
+   *   useCallback([]) — 모든 의존 데이터가 ref / 모듈 스코프(getIdToIndex 등) 라 안정.
+   *   매 프레임 새 함수가 만들어지면 HoverTooltip 의 useEffect 가 재실행되어 깜빡임.
+   */
+  const getHoverProjection = useCallback((): HoverTooltipProjection | null => {
+    const hoveredId = useCosmosStore.getState().hoveredNodeId;
+    if (hoveredId === null) return null;
+    const scene = sceneRef.current;
+    const buffer = bufferRef.current;
+    if (!scene || !buffer) return null;
+    const idx = getIdToIndex().get(hoveredId);
+    if (idx === undefined || idx < 0 || idx >= buffer.count) return null;
+    const name = getIndexToName()[idx];
+    if (!name) return null;
+    const base = idx * 3;
+    const x = buffer.positions[base];
+    const y = buffer.positions[base + 1];
+    const z = buffer.positions[base + 2];
+    const camera = scene.getCamera();
+    const canvas = scene.getRenderer().domElement;
+    const cssW = canvas.clientWidth || window.innerWidth;
+    const cssH = canvas.clientHeight || window.innerHeight;
+    const proj = projectToScreen({ x, y, z }, camera, cssW, cssH);
+    if (proj.behindCamera) return null;
+    return { screenX: proj.screenX, screenY: proj.screenY, name };
+  }, []);
+
   return (
     <div className="app-root">
       {/* three.js canvas가 이 div 안에 마운트됨 */}
@@ -371,6 +477,10 @@ function App() {
 
       {/* M6-2 Step 3: 좌측 하단 — 정식 스캔 트리거 패널 */}
       <ScanControl onStartScan={handleStartScan} />
+
+      {/* M7-2 Step 2: 호버 시 노드 이름을 노드 위에 띄우는 DOM 툴팁.
+          내부 rAF 가 getHoverProjection 을 매 프레임 호출해 카메라 이동에도 따라간다. */}
+      <HoverTooltip getProjection={getHoverProjection} />
     </div>
   );
 }

@@ -228,15 +228,28 @@ describe("InstancedNodes", () => {
    * 외부 보유 uniforms 객체로 검증한다 (이게 InstancedNodes 가 자체 보유하는 이유).
    */
   describe("size attenuation uniforms (M7-1 Step 2)", () => {
-    it("기본 uniform 값: uMinPixelSize=4, uBaseRadius=500, uResolution=(1,1)", () => {
-      // BASE_RADIUS 는 100K 거리 스케일 대응으로 500. 시각 검증 결과 5.0 은 항상 4px
-      // 클램프만 발동해 거리감 표현 불가. 후속 depth-aware scale 도입 전까지 500 고정.
+    it("기본 uniform 값: uMinPixelSize=4, uBaseRadius=1, uResolution=(1,1), uTanHalfFov=tan(25°)", () => {
+      // (D15) BASE_RADIUS=1 — 실제 크기는 instanceMatrix 의 uniform scale 이 결정.
+      //   pixelDiameter = uBaseRadius * instanceScale * (1/uTanHalfFov) * H / depth.
+      // (M7-2 Step 2 hotfix) projectionMatrix[1][1] 대신 uTanHalfFov 사용 — picker 의
+      //   setViewOffset 부작용 회피. 기본값은 Scene fov=50° 와 일치하도록 tan(25°).
       const nodes = new InstancedNodes(4);
       const u = nodes.getUniforms();
       expect(u.uMinPixelSize.value).toBeCloseTo(4.0);
-      expect(u.uBaseRadius.value).toBeCloseTo(500.0);
+      expect(u.uBaseRadius.value).toBeCloseTo(1.0);
       expect(u.uResolution.value.x).toBeCloseTo(1);
       expect(u.uResolution.value.y).toBeCloseTo(1);
+      expect(u.uTanHalfFov.value).toBeCloseTo(Math.tan((50 * Math.PI) / 360), 6);
+    });
+
+    it("(M7-2) options.tanHalfFov 가 uniform 에 반영 + setTanHalfFov 로 갱신 가능", () => {
+      const custom = Math.tan((90 * Math.PI) / 360); // fov=90° 가정 → tan(45°)=1
+      const nodes = new InstancedNodes(4, { tanHalfFov: custom });
+      const u = nodes.getUniforms();
+      expect(u.uTanHalfFov.value).toBeCloseTo(custom, 6);
+      // 런타임 갱신.
+      nodes.setTanHalfFov(0.5);
+      expect(u.uTanHalfFov.value).toBeCloseTo(0.5);
     });
 
     it("constructor options.resolution 이 uResolution 에 반영됨", () => {
@@ -262,6 +275,70 @@ describe("InstancedNodes", () => {
       // onBeforeCompile 함수가 등록됐는지만 검증 — jsdom 에서는 호출되지 않음.
       expect(typeof mat.onBeforeCompile).toBe("function");
       expect(typeof mat.customProgramCacheKey).toBe("function");
+    });
+  });
+
+  describe("Depth-Aware instance scale (D15)", () => {
+    it("buffer.scales[i] 가 instanceMatrix 의 uniform scale 로 compose 됨", () => {
+      const nodes = new InstancedNodes(4);
+      const buffer = allocateNodeBuffer(4);
+      // pushNode 의 4번째 인자가 scale. D1(500), D2(50), D5(0.05) 모사.
+      pushNode(buffer, 10, 20, 30, 500);
+      pushNode(buffer, -5, 0, 7, 50);
+      pushNode(buffer, 100, -50, 0, 0.05);
+
+      nodes.syncFromBuffer(buffer);
+      expect(nodes.getCount()).toBe(3);
+
+      const m = new THREE.Matrix4();
+      const p = new THREE.Vector3();
+      const q = new THREE.Quaternion();
+      const s = new THREE.Vector3();
+
+      nodes.getMesh().getMatrixAt(0, m);
+      m.decompose(p, q, s);
+      expect(p.x).toBeCloseTo(10);
+      // uniform scale → x/y/z 모두 500.
+      expect(s.x).toBeCloseTo(500);
+      expect(s.y).toBeCloseTo(500);
+      expect(s.z).toBeCloseTo(500);
+
+      nodes.getMesh().getMatrixAt(1, m);
+      m.decompose(p, q, s);
+      expect(p.x).toBeCloseTo(-5);
+      expect(s.x).toBeCloseTo(50);
+
+      nodes.getMesh().getMatrixAt(2, m);
+      m.decompose(p, q, s);
+      expect(s.x).toBeCloseTo(0.05);
+    });
+
+    it("vertex shader 에 instanceScale 추출 + pixelDiameter 가중 식이 들어있음", () => {
+      // onBeforeCompile 은 첫 렌더 시점에만 호출되므로 직접 호출해 shader 객체를 들여다본다.
+      const nodes = new InstancedNodes(4);
+      const mat = nodes.getMesh().material as THREE.MeshBasicMaterial;
+      // 가짜 shader: WebGLProgram 빌드 흐름의 입력 — onBeforeCompile 이 in-place 패치.
+      const fakeShader = {
+        uniforms: {} as Record<string, { value: unknown }>,
+        vertexShader: "#include <common>\n#include <project_vertex>",
+        fragmentShader: "",
+      };
+      mat.onBeforeCompile!(
+        fakeShader as unknown as Parameters<
+          NonNullable<THREE.MeshBasicMaterial["onBeforeCompile"]>
+        >[0],
+        // 두 번째 인자(renderer) 는 사용하지 않으므로 더미.
+        {} as THREE.WebGLRenderer
+      );
+      // 핵심 키워드들 — 메인 셰이더가 instance uniform scale 을 정확히 반영.
+      expect(fakeShader.vertexShader).toContain("_instanceScale");
+      expect(fakeShader.vertexShader).toContain("length(instanceMatrix[0].xyz)");
+      // pixelDiameter 식에 instanceScale 곱이 들어있어야 한다.
+      expect(fakeShader.vertexShader).toMatch(/uBaseRadius\s*\*\s*_instanceScale/);
+      // (M7-2 Step 2 hotfix) projectionMatrix[1][1] 직접 사용 금지 — uTanHalfFov 로 치환.
+      //   picker 의 setViewOffset 이 P11 을 부풀려도 영향받지 않게.
+      expect(fakeShader.vertexShader).toContain("uTanHalfFov");
+      expect(fakeShader.vertexShader).not.toMatch(/projectionMatrix\[1\]\[1\]/);
     });
   });
 

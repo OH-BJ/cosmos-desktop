@@ -36,6 +36,27 @@ const CLICK_DISTANCE_THRESHOLD = 5;
  */
 export interface CameraControllerOptions {
   onPick?: (nodeId: string | null) => void;
+  /**
+   * onPickPixel — 클릭(드래그 아님) 발생 시 클라이언트 픽셀 좌표를 그대로 전달 (M7-2 Step 1).
+   *   App 이 GPUPicker.pickAtScreen 을 호출하기 위한 hook. onPick(raycaster) 직후에 호출되므로
+   *   같은 click 에서 두 경로가 모두 동작하고, App 측에서 GPU 결과를 selectNode 로 덮어쓸 수 있음.
+   *   기존 Raycaster 경로 폐기 결정은 Step 3 에서.
+   */
+  onPickPixel?: (clientX: number, clientY: number) => void;
+  /**
+   * onHoverPick — 마우스가 노드 위에 머무를 때 GPU Picker 로 호버 ID 조회용 콜백 (M7-2 Step 2).
+   *
+   *   호출 보장:
+   *   - 드래그 중 (isDragging) 에는 호출되지 않는다 (호버/팬 충돌 방지).
+   *   - 매 mousemove 마다 즉시 호출되지 않음. **rAF + Dirty Flag** 로 1 프레임당 최대 1회.
+   *
+   *   App 이 받은 (clientX, clientY) → GPUPicker.pickAtScreen → instanceId → store.setHoveredNode.
+   */
+  onHoverPick?: (clientX: number, clientY: number) => void;
+  /**
+   * onHoverLeave — 마우스가 캔버스를 벗어났을 때 (pointerleave) 호출. 호버 상태 클리어용.
+   */
+  onHoverLeave?: () => void;
 }
 
 /**
@@ -116,6 +137,21 @@ export class CameraController {
   private pickTarget: THREE.Object3D | null = null;
   private indexToIdResolver: (() => readonly string[]) | null = null;
   private readonly onPick: ((nodeId: string | null) => void) | null;
+  private readonly onPickPixel: ((clientX: number, clientY: number) => void) | null;
+  private readonly onHoverPick: ((clientX: number, clientY: number) => void) | null;
+  private readonly onHoverLeave: (() => void) | null;
+
+  // (M7-2 Step 2) rAF + Dirty Flag 기반 hover throttle 상태.
+  //   - hoverRafId: 다음 rAF 콜백의 ID. null = 미예약.
+  //   - hoverDirty: 마지막 rAF 이후 mousemove 가 한 번이라도 있었는가.
+  //   - hoverX/Y: 가장 최근 mousemove 의 클라이언트 좌표.
+  //   매 mousemove 마다 dirty=true + rAF 미예약이면 예약. tick 에서 onHoverPick 1회만.
+  private hoverRafId: number | null = null;
+  private hoverDirty = false;
+  private hoverX = 0;
+  private hoverY = 0;
+  // 마지막으로 디스패치한 위치 — pointerleave 도 onHoverPick 인지를 결정할 때 사용 X (지금은 단순화).
+  private readonly onPointerLeave: (e: PointerEvent) => void;
 
   constructor(
     camera: THREE.PerspectiveCamera,
@@ -125,12 +161,16 @@ export class CameraController {
     this.camera = camera;
     this.domElement = domElement;
     this.onPick = options?.onPick ?? null;
+    this.onPickPixel = options?.onPickPixel ?? null;
+    this.onHoverPick = options?.onHoverPick ?? null;
+    this.onHoverLeave = options?.onHoverLeave ?? null;
     this.raycaster = new THREE.Raycaster();
 
     this.onMouseDown = (e) => this.handleMouseDown(e);
     this.onMouseMove = (e) => this.handleMouseMove(e);
     this.onMouseUp = (e) => this.handleMouseUp(e);
     this.onPointerCancel = (e) => this.handlePointerCancel(e);
+    this.onPointerLeave = (e) => this.handlePointerLeave(e);
     this.onWheel = (e) => this.handleWheel(e);
     this.onKeyDown = (e) => this.handleKeyDown(e);
 
@@ -144,6 +184,9 @@ export class CameraController {
     this.domElement.addEventListener("pointermove", this.onMouseMove);
     this.domElement.addEventListener("pointerup", this.onMouseUp);
     this.domElement.addEventListener("pointercancel", this.onPointerCancel);
+    // (M7-2 Step 2) 호버 클리어용 — 마우스가 캔버스 밖으로 나가면 호버 ID null 로 dispatch.
+    //   pointerleave 는 pointerout 과 달리 children 으로 들어갈 때는 발사 안 됨 → 캔버스 외곽 전용.
+    this.domElement.addEventListener("pointerleave", this.onPointerLeave);
     // wheel 도 canvas 위에서만. passive=false 여야 preventDefault() 로 페이지 스크롤 차단 가능.
     this.domElement.addEventListener("wheel", this.onWheel, { passive: false });
     // keydown 은 window 레벨 — canvas 가 포커스 대상이 아니기 때문.
@@ -254,6 +297,15 @@ export class CameraController {
    * (줌 후에도 자연스러운 팬 속도 유지 — 가까이 가면 민감해지고, 멀어지면 둔해짐.)
    */
   private handleMouseMove(e: PointerEvent): void {
+    // (M7-2 Step 2) 호버 스케줄링은 드래그 여부와 별개로 매 mousemove 마다 1회 가능.
+    //   드래그 중이면 onHoverPick 자체를 보내지 않게 tickHover 가 가드 (아래 처리).
+    if (this.onHoverPick) {
+      this.hoverX = e.clientX;
+      this.hoverY = e.clientY;
+      this.hoverDirty = true;
+      this.scheduleHoverTick();
+    }
+
     if (!this.isDragging) return;
 
     const dx = e.clientX - this.lastClientX;
@@ -281,12 +333,18 @@ export class CameraController {
     // 드래그/클릭 판정: 전체 이동 거리(맨해튼) 가 임계값 미만이면 클릭으로 처리.
     // button 체크는 mousedown 쪽에서 이미 0 으로 제한되므로 여기서는 생략 가능하지만,
     // window mouseup 이벤트가 다른 경로로 들어올 여지를 막기 위해 방어적으로 확인.
-    if (e.button === 0 && this.onPick) {
+    if (e.button === 0) {
       const totalDist =
         Math.abs(e.clientX - this.downClientX) +
         Math.abs(e.clientY - this.downClientY);
       if (totalDist < CLICK_DISTANCE_THRESHOLD) {
-        this.performPick(e.clientX, e.clientY);
+        if (this.onPick) {
+          this.performPick(e.clientX, e.clientY);
+        }
+        // M7-2 Step 1: GPU Picking 경로. Raycaster 결과를 덮어쓰는 식으로 동작 (마지막 디스패치가 이김).
+        if (this.onPickPixel) {
+          this.onPickPixel(e.clientX, e.clientY);
+        }
       }
     }
 
@@ -371,6 +429,44 @@ export class CameraController {
   }
 
   /**
+   * scheduleHoverTick — rAF 가 아직 예약 안 됐을 때만 1개 예약 (Dirty Flag 패턴).
+   *   여러 mousemove 가 연속해도 한 프레임에 한 번만 GPU 픽 호출 → throttle 효과.
+   */
+  private scheduleHoverTick(): void {
+    if (this.hoverRafId !== null) return;
+    // rAF 가 없는 환경(test setup 등)에서도 안전하도록 보호.
+    if (typeof requestAnimationFrame !== "function") return;
+    this.hoverRafId = requestAnimationFrame(() => this.tickHover());
+  }
+
+  /**
+   * tickHover — 한 프레임의 dirty 이벤트를 묶어 onHoverPick 1회 호출.
+   *   드래그 중에는 호버 dispatch 자체를 스킵 (팬 중 툴팁이 따라다니지 않게).
+   */
+  private tickHover(): void {
+    this.hoverRafId = null;
+    if (!this.hoverDirty) return;
+    this.hoverDirty = false;
+    if (this.isDragging) return;
+    this.onHoverPick?.(this.hoverX, this.hoverY);
+  }
+
+  /**
+   * handlePointerLeave — 마우스가 캔버스 영역을 떠나면 호버 상태 클리어.
+   *   pending rAF 도 취소해 백그라운드 픽 호출 방지.
+   */
+  private handlePointerLeave(_e: PointerEvent): void {
+    if (this.hoverRafId !== null) {
+      if (typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(this.hoverRafId);
+      }
+      this.hoverRafId = null;
+    }
+    this.hoverDirty = false;
+    this.onHoverLeave?.();
+  }
+
+  /**
    * handleWheel — 휠로 카메라 z축 이동 (줌 in/out).
    *
    * 방향 규칙:
@@ -399,8 +495,19 @@ export class CameraController {
     this.domElement.removeEventListener("pointermove", this.onMouseMove);
     this.domElement.removeEventListener("pointerup", this.onMouseUp);
     this.domElement.removeEventListener("pointercancel", this.onPointerCancel);
+    this.domElement.removeEventListener("pointerleave", this.onPointerLeave);
     this.domElement.removeEventListener("wheel", this.onWheel);
     window.removeEventListener("keydown", this.onKeyDown);
+
+    // (M7-2 Step 2) pending rAF 정리 — HMR / 더블 마운트 시 잔여 콜백이
+    //   파괴된 컨트롤러의 멤버를 건드리지 않게.
+    if (this.hoverRafId !== null) {
+      if (typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(this.hoverRafId);
+      }
+      this.hoverRafId = null;
+    }
+    this.hoverDirty = false;
 
     // 잔존 캡처 해제 (HMR 중 dispose 누락 시 다음 인스턴스와 경쟁 방지).
     if (

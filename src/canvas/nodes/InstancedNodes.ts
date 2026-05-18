@@ -33,12 +33,11 @@ import { useCosmosStore } from "../../state/store";
  *   InstancedNodes.syncFromBuffer → InstancedMesh.instanceMatrix
  */
 
-// BASE_RADIUS=500 — Fractal Orbital Packing 의 100K 거리 스케일에 맞춘 월드 반지름.
-//   5.0 일 때 모든 깊이에서 pixelDiameter < 4 → 항상 4px 클램프만 발동 (별 크기 고정).
-//   500 으로 키우면 D1 줌인(z≈10K)에서 입체 별로 보이고, 줌아웃 시 4px 클램프 자연 전이.
-//   D5(≈10) 침투 시 화면 폭발 문제는 인지 — depth-aware instance scale 로 후속 마일스톤 해결.
-//   uBaseRadius uniform 과 반드시 일치해야 함 (vertex shader pixelDiameter 계산 기준).
-const BASE_RADIUS = 500.0;
+// (D15 Depth-Aware) BASE_RADIUS=1 — "기본 단위 구체" 의미.
+//   실제 노드 크기는 instanceMatrix 의 uniform scale 이 결정한다 (D1=500, D2=50, ...).
+//   pixelDiameter = uBaseRadius * instanceScale * P11 * H / depth 로 셰이더가 계산.
+//   M7-1 시절 BASE_RADIUS=500 균일 스케일이 만들던 D3+ 노드 겹침 문제 해결.
+const BASE_RADIUS = 1.0;
 const MIN_PIXEL_SIZE = 4.0; // 최소 화면 지름 (px). 4×4 Hit-Area 보장 (Step 2 목표).
 
 export class InstancedNodes {
@@ -51,10 +50,17 @@ export class InstancedNodes {
   //   호출되지 않는다. 셰이더의 shader.uniforms 와 동일한 { value } 참조를 공유시켜
   //   - GPU 가 매 프레임 이 객체의 .value 를 읽어가고
   //   - setResolution() 같은 외부 API 가 .value 만 갱신하면 자동 반영되도록 한다.
+  //
+  //  (M7-2 Step 2 hotfix) uTanHalfFov 추가 — `projectionMatrix[1][1]` 를 직접 쓰지 않음.
+  //    이유: GPUPicker.pickAtScreen 이 `camera.setViewOffset(...)` 으로 P11 을 ~H 배
+  //    부풀려놓기 때문. 같은 셰이더 식이 메인/픽커 양쪽에서 일관되려면 setViewOffset
+  //    영향과 독립인 값을 써야 한다. fov 는 setViewOffset 으로 변하지 않으므로
+  //    `1/tan(fov/2)` 가 안전한 P11 대체값.
   private readonly uniforms: {
     uResolution: { value: THREE.Vector2 };
     uMinPixelSize: { value: number };
     uBaseRadius: { value: number };
+    uTanHalfFov: { value: number };
   };
 
   // M4 Step 2: 선택 하이라이트 구독 해제 함수 (bindSelectionHighlight 가 반환).
@@ -68,19 +74,23 @@ export class InstancedNodes {
    */
   constructor(
     capacity: number = 1024,
-    options?: { resolution?: [number, number] }
+    options?: { resolution?: [number, number]; tanHalfFov?: number }
   ) {
-    // Geometry: 기본 작은 구형 (반지름 BASE_RADIUS).
-    //   vertex shader 의 uBaseRadius 와 반드시 동일 — pixelDiameter 계산이 일치해야
-    //   "가까울 땐 원본 크기, 멀 땐 4px" 의 자연스러운 전이가 성립한다.
+    // Geometry: 기본 단위 구체 (반지름 1).
+    //   실제 노드 크기는 instanceMatrix 의 uniform scale 이 결정 (D15 Depth-Aware).
+    //   vertex shader 의 uBaseRadius 와 반드시 동일.
     const geometry = new THREE.SphereGeometry(BASE_RADIUS, 16, 16);
 
     // uniforms 객체 — shader.uniforms 와 객체 참조를 공유한다.
     const [initW, initH] = options?.resolution ?? [1, 1];
+    // tanHalfFov 기본 = tan(50°/2) ≈ 0.4663 (Scene 의 fov=50° 와 일치).
+    //   App 이 mount 시 camera.fov 에서 계산해 주입하는 것이 권장.
+    const initTan = options?.tanHalfFov ?? Math.tan((50 * Math.PI) / 360);
     this.uniforms = {
       uResolution: { value: new THREE.Vector2(initW, initH) },
       uMinPixelSize: { value: MIN_PIXEL_SIZE },
       uBaseRadius: { value: BASE_RADIUS },
+      uTanHalfFov: { value: initTan },
     };
 
     // Material: MeshBasicMaterial 베이스 + onBeforeCompile 패치.
@@ -99,6 +109,7 @@ export class InstancedNodes {
       shader.uniforms.uResolution = this.uniforms.uResolution;
       shader.uniforms.uMinPixelSize = this.uniforms.uMinPixelSize;
       shader.uniforms.uBaseRadius = this.uniforms.uBaseRadius;
+      shader.uniforms.uTanHalfFov = this.uniforms.uTanHalfFov;
 
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -106,7 +117,8 @@ export class InstancedNodes {
           `#include <common>
 uniform vec2 uResolution;
 uniform float uMinPixelSize;
-uniform float uBaseRadius;`
+uniform float uBaseRadius;
+uniform float uTanHalfFov;`
         )
         .replace(
           "#include <project_vertex>",
@@ -122,10 +134,15 @@ vec4 _vertexLocal = vec4(transformed, 1.0);
 vec4 _centerView = modelViewMatrix * _instCenterLocal;
 vec4 _vertexView = modelViewMatrix * _vertexLocal;
 
-// 화면상 base sphere 의 지름 (px). projectionMatrix[1][1] = 1/tan(fov/2).
-//   pixelRadius = r * P11 * (H/2) / depth → diameter = r * P11 * H / depth.
+// (D15) instance 의 uniform scale 추출.
+//   instanceMatrix 의 column 0 길이 = scaleX. uniform scale 이라 |col0|=|col1|=|col2|=scale.
+float _instanceScale = length(instanceMatrix[0].xyz);
+// 화면상 sphere 의 지름 (px). (M7-2 Step 2 hotfix) uTanHalfFov 사용 — picker 의
+//   camera.setViewOffset(...) 가 P11 을 부풀려도 영향받지 않게.
+//   1/tan(fov/2) = 원래 P11 과 수학적으로 동일하므로 메인 시각 변화 0.
+//   유효 반지름 = uBaseRadius × _instanceScale → D1=500, D2=50, ... 로 다양한 노드 크기.
 float _depth = max(-_centerView.z, 0.001);
-float _pixelDiameter = uBaseRadius * projectionMatrix[1][1] * uResolution.y / _depth;
+float _pixelDiameter = uBaseRadius * _instanceScale * (1.0 / uTanHalfFov) * uResolution.y / _depth;
 // 멀어서 4px 미만이면 scaleFactor>1 로 키움, 가까울 땐 1.0 으로 원본 크기 유지.
 float _scaleFactor = max(1.0, uMinPixelSize / _pixelDiameter);
 
@@ -138,7 +155,9 @@ gl_Position = projectionMatrix * mvPosition;
     };
     // onBeforeCompile 을 쓰면 같은 source 가 서로 다른 인스턴스에서 캐시 충돌 가능 →
     //   고유 key 로 program 캐시를 격리.  (uniforms 가 같은 GLSL 을 공유하므로 단일 키 OK.)
-    this.material.customProgramCacheKey = () => "cosmos-instanced-size-attenuation";
+    //   D15 셰이더 변경 시 키 갱신 — 기존 cache 의 stale 프로그램 재사용 방지.
+    this.material.customProgramCacheKey = () =>
+      "cosmos-instanced-size-attenuation-m7-2-tan-half-fov";
 
     // InstancedMesh(geometry, material, capacity)
     this.mesh = new THREE.InstancedMesh(geometry, this.material, capacity);
@@ -183,17 +202,25 @@ gl_Position = projectionMatrix * mvPosition;
     const rawStart = options?.startIndex ?? 0;
     const startIndex = Math.max(0, Math.min(rawStart, renderCount));
 
-    // Matrix4 한 개를 재사용해 GC 부담 최소화.
+    // Matrix4 + Vector3/Quaternion 재사용해 GC 부담 최소화.
     // setMatrixAt은 내부적으로 행렬을 복사하므로 매 인덱스마다 새 객체 불필요.
+    // (D15) compose(position, rotation, scale) — uniform scale 로 instanceMatrix 합성.
+    //   회전은 identity (변동 없음). scale 은 buffer.scales[i] 그대로.
     const matrix = new THREE.Matrix4();
+    const tmpPos = new THREE.Vector3();
+    const tmpQuat = new THREE.Quaternion();
+    const tmpScale = new THREE.Vector3();
 
     for (let i = startIndex; i < renderCount; i++) {
       const base = i * 3; // stride 3
       const x = buffer.positions[base];
       const y = buffer.positions[base + 1];
       const z = buffer.positions[base + 2];
+      const s = buffer.scales[i];
 
-      matrix.makeTranslation(x, y, z);
+      tmpPos.set(x, y, z);
+      tmpScale.set(s, s, s);
+      matrix.compose(tmpPos, tmpQuat, tmpScale);
       this.mesh.setMatrixAt(i, matrix);
     }
 
@@ -241,6 +268,16 @@ gl_Position = projectionMatrix * mvPosition;
   }
 
   /**
+   * setTanHalfFov() — 카메라 fov 가 바뀔 때 갱신용 (현재 앱에서는 mount 시 1회만 필요).
+   *
+   *   `value = Math.tan(camera.fov * Math.PI / 360)`.
+   *   GPUPicker 와 동일한 값을 공유해야 시각/판정 일치 — App 에서 같은 값을 주입.
+   */
+  setTanHalfFov(value: number): void {
+    this.uniforms.uTanHalfFov.value = value;
+  }
+
+  /**
    * getUniforms() — 셰이더 uniform 객체 노출 (테스트용).
    *
    * Resolution 갱신 / 초기값 검증 / pixelMinSize 정책 변경 같은 단위 테스트가
@@ -250,6 +287,7 @@ gl_Position = projectionMatrix * mvPosition;
     uResolution: { value: THREE.Vector2 };
     uMinPixelSize: { value: number };
     uBaseRadius: { value: number };
+    uTanHalfFov: { value: number };
   } {
     return this.uniforms;
   }
@@ -303,6 +341,14 @@ gl_Position = projectionMatrix * mvPosition;
       const y = buffer.positions[base + 1];
       const z = buffer.positions[base + 2];
       highlightMesh.position.set(x, y, z);
+      // (D15) Depth-Aware scale 도입 후 노드 크기가 5000~0.05 까지 다양하므로
+      //   고정 반지름 highlight 가 D1 안에서 사라지고 D5 위에선 거대 wireframe 으로 보임.
+      //   buffer.scales[index] 를 그대로 곱해 노드 크기에 맞춰 동행. (geometry 자체는
+      //   Scene 의 SphereGeometry(6.5) 가 그대로지만 mesh.scale 로 외형 보정.)
+      const instScale = buffer.scales[index];
+      // 6.5 (기존 geometry 반지름) × 0.2 → 단위 반지름 1.3 효과. 거기에 instScale 곱해
+      //   노드 반지름(=instScale, geometry 1) 대비 약 30% 더 큰 윤곽 유지.
+      highlightMesh.scale.setScalar(instScale * 0.2);
       highlightMesh.visible = true;
     };
 

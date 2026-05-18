@@ -41,10 +41,12 @@ const mockedListen = events.nodeChunkEvent.listen as unknown as ReturnType<
 
 /**
  * ScannedNode 형태의 stub 생성. (M7-1 Step 1) position 필수.
+ * (D15) scale 기본 500 (D1 노드 대응). 명시 시 override.
  */
 function makeScannedNode(
   id: string,
-  position: [number, number, number] = [0, 0, 0]
+  position: [number, number, number] = [0, 0, 0],
+  scale: number = 500
 ) {
   return {
     id,
@@ -54,17 +56,24 @@ function makeScannedNode(
     sizeBytes: 0,
     depth: 1,
     position,
+    scale,
   };
 }
 
 function makeChunk(
   chunkId: number,
-  nodes: Array<{ id: string; position?: [number, number, number] }>,
+  nodes: Array<{
+    id: string;
+    position?: [number, number, number];
+    scale?: number;
+  }>,
   isLast = false
 ): NodeChunkEvent {
   return {
     chunkId,
-    nodes: nodes.map((n) => makeScannedNode(n.id, n.position ?? [0, 0, 0])),
+    nodes: nodes.map((n) =>
+      makeScannedNode(n.id, n.position ?? [0, 0, 0], n.scale ?? 500)
+    ),
     isLast,
     totalScanned: nodes.length,
   };
@@ -179,6 +188,19 @@ describe("processNodeChunk", () => {
     expect(appended).toBe(1);
     expect(buffer.count).toBe(1);
     // isLast 는 종료 신호 (UI 표시 용) — 본 모듈에서는 추가 동작이 없어야 함.
+  });
+
+  it("(D15) ScannedNode.scale → buffer.scales 점진 append", () => {
+    const buffer = allocateNodeBuffer(8);
+    const chunk = makeChunk(0, [
+      { id: "d1", position: [1, 2, 3], scale: 500 },
+      { id: "d2", position: [4, 5, 6], scale: 50 },
+      { id: "d5", position: [7, 8, 9], scale: 0.05 },
+    ]);
+    processNodeChunk(chunk, buffer);
+    expect(buffer.scales[0]).toBeCloseTo(500);
+    expect(buffer.scales[1]).toBeCloseTo(50);
+    expect(buffer.scales[2]).toBeCloseTo(0.05);
   });
 
   it("Rust 가 보낸 position 을 그대로 신뢰 (frontend 변환 X)", () => {

@@ -3,6 +3,7 @@ import {
   syncFromStore,
   getIdToIndex,
   getIndexToId,
+  getIndexToName,
   appendChunkedNode,
   clearChunkedNodes,
   getStoreNodesBoundary,
@@ -172,5 +173,44 @@ describe("clearChunkedNodes (β: 청크만 리셋)", () => {
     expect(clearChunkedNodes(buffer)).toBe(1);
     expect(clearChunkedNodes(buffer)).toBe(0);
     expect(buffer.count).toBe(1);
+  });
+});
+
+/**
+ * (M7-2 Step 2) indexToName 매핑 — 호버 툴팁이 이름 조회에 사용.
+ *
+ *  - syncFromStore: Node.path 의 마지막 segment 폴백 (Node 에 name 필드 없음).
+ *  - appendChunkedNode: 명시 name 파라미터 그대로 저장. 누락 시 id 폴백.
+ *  - clearChunkedNodes: indexToName 도 함께 절단.
+ */
+describe("indexToName (M7-2 Step 2 — 호버 툴팁 이름 매핑)", () => {
+  it("syncFromStore: path 의 마지막 segment 가 이름으로 등록됨", () => {
+    const buffer = allocateNodeBuffer(8);
+    syncFromStore(
+      [
+        { id: "a", path: "/foo/bar/leaf.txt", x: 0, y: 0, z: 0 },
+        { id: "b", path: "C:\\Users\\demo\\file.md", x: 0, y: 0, z: 0 },
+        { id: "c", path: "no-separator", x: 0, y: 0, z: 0 },
+      ],
+      buffer
+    );
+    const names = getIndexToName();
+    expect(names[0]).toBe("leaf.txt");
+    expect(names[1]).toBe("file.md");
+    expect(names[2]).toBe("no-separator");
+  });
+
+  it("appendChunkedNode: name 파라미터가 그대로 indexToName 에 저장 + clearChunkedNodes 시 정리", () => {
+    const buffer = allocateNodeBuffer(8);
+    syncFromStore([], buffer); // 매핑 리셋
+    appendChunkedNode(buffer, "u1", 0, 0, 0, 500, "alpha.png");
+    appendChunkedNode(buffer, "u2", 0, 0, 0, 50, "beta.svg");
+    const names = getIndexToName();
+    expect(names[0]).toBe("alpha.png");
+    expect(names[1]).toBe("beta.svg");
+
+    // 청크 노드 절단 → indexToName 도 줄어야 한다 (id 매핑과 lockstep).
+    clearChunkedNodes(buffer);
+    expect(getIndexToName().length).toBe(0);
   });
 });

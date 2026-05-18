@@ -87,6 +87,13 @@ interface CosmosStore {
   selectedNodeId: string | null;
   selectNode: (id: string | null) => void;
 
+  // M7-2 Step 2: 호버 중인 노드 ID. 마우스가 노드 위에 있을 때만 non-null.
+  //   - 선택과 별도 (selectedNodeId 와 동시 가능).
+  //   - 마우스 이동 시 rAF + Dirty Flag throttle 로 GPU Picker 결과를 반영.
+  //   - 캔버스 벗어나거나 빈 공간 위면 null.
+  hoveredNodeId: string | null;
+  setHoveredNode: (id: string | null) => void;
+
   // M5: 선택된 노드의 메타데이터 (Rust IPC `get_node_details` 응답).
   // null인 경우 = 미선택 또는 IPC 응답 대기 중 또는 조회 실패.
   // selectedNodeId 변경 시 nodeDetailsSync 모듈이 비동기로 채워준다.
@@ -123,6 +130,13 @@ export const useCosmosStore = create<CosmosStore>()(subscribeWithSelector((set) 
 
   selectedNodeId: null,
   selectNode: (id: string | null) => set({ selectedNodeId: id }),
+
+  hoveredNodeId: null,
+  setHoveredNode: (id: string | null) => {
+    // 동일 ID 재호출은 set 스킵 — Zustand 가 ref 비교로 noop 처리하지만 명시.
+    if (useCosmosStore.getState().hoveredNodeId === id) return;
+    set({ hoveredNodeId: id });
+  },
 
   selectedNodeDetails: null,
   setSelectedNodeDetails: (details: NodeDetails | null) =>

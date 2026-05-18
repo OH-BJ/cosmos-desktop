@@ -110,6 +110,9 @@ pub struct NodeDetails {
 /// - `position: [f32; 3]` — (M7-1 Step 1) Fractal Orbital Packing 으로 계산된
 ///   3D 우주 좌표. Frontend 가 더 이상 random 폴백을 만들지 않고 그대로 사용.
 ///   `f32` 인 이유: GPU 인스턴스 매트릭스가 `Float32Array` 라 어차피 다운캐스트됨.
+/// - `scale: f32` — (D15 Depth-Aware) 깊이별 인스턴스 스케일. `coords::scale_for_depth(depth)`
+///   결과를 그대로 저장. Frontend 가 InstancedMesh 의 instanceMatrix 에 uniform scale
+///   로 합성. 균일 BASE_RADIUS 가 만들던 D3+ 노드 겹침 문제를 해결한다.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ScannedNode {
@@ -120,6 +123,7 @@ pub struct ScannedNode {
     pub size_bytes: u64,
     pub depth: u32,
     pub position: [f32; 3],
+    pub scale: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -293,11 +297,13 @@ mod tests {
             size_bytes: 1234,
             depth: 2,
             position: [1.5, -2.5, 3.5],
+            scale: 50.0,
         };
         let json = serde_json::to_string(&n).expect("ScannedNode 직렬화 실패");
         assert!(json.contains("\"sizeBytes\""), "sizeBytes (camelCase) 필요");
         assert!(json.contains("\"depth\""), "depth 필드 포함");
         assert!(json.contains("\"position\""), "position 필드 포함");
+        assert!(json.contains("\"scale\""), "scale 필드 포함 (D15)");
         assert!(json.contains("\"kind\":\"file\""), "kind는 enum camelCase");
         assert!(!json.contains("size_bytes"), "snake_case 새지 않아야 함");
 
@@ -320,6 +326,7 @@ mod tests {
                 size_bytes: 42,
                 depth: 1,
                 position: [0.0, 0.0, 0.0],
+                scale: 500.0,
             }],
             is_last: true,
             total_scanned: 1500,
@@ -348,6 +355,28 @@ mod tests {
         let json = serde_json::to_string(&terminal).expect("빈 청크 직렬화");
         assert!(json.contains("\"nodes\":[]"), "빈 nodes 배열");
         assert!(json.contains("\"isLast\":true"));
+    }
+
+    /// (D15) ScannedNode.scale 이 JSON 에 평문 number 로 직렬화 + 역직렬화 후 동일.
+    ///   f32 의 0.05 같은 비정수가 round-trip 되는지 회귀 방지.
+    #[test]
+    fn test_scanned_node_scale_roundtrip() {
+        let cases = [5000.0_f32, 500.0, 50.0, 5.0, 0.5, 0.05];
+        for s in cases {
+            let n = ScannedNode {
+                id: "x".into(),
+                path: "/x".into(),
+                name: "x".into(),
+                kind: NodeKind::File,
+                size_bytes: 0,
+                depth: 1,
+                position: [0.0, 0.0, 0.0],
+                scale: s,
+            };
+            let json = serde_json::to_string(&n).expect("직렬화");
+            let back: ScannedNode = serde_json::from_str(&json).expect("역직렬화");
+            assert_eq!(back.scale, s, "scale={s} round-trip 동일");
+        }
     }
 
     /// NodeKind 각 variant가 camelCase로 직렬화되는지 확인

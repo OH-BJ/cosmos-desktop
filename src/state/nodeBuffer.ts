@@ -26,16 +26,20 @@
 export const INITIAL_CAPACITY = 1024;
 
 /**
- * NodeBuffer — 노드 좌표를 저장하는 저수준 버퍼
+ * NodeBuffer — 노드 좌표 + 인스턴스 스케일 저수준 버퍼
  *
  * @property positions Float32Array (stride 3: x, y, z)
- * @property capacity 최대 수용 노드 수
- * @property count 현재 활성 노드 수
+ * @property scales    Float32Array (stride 1) — (D15) 깊이별 instance scale.
+ *   InstancedMesh 의 instanceMatrix 가 uniform scale 로 합성될 때 사용.
+ *   기본값 1 (스토어 데모 노드 등 depth 정보 없는 항목).
+ * @property capacity  최대 수용 노드 수
+ * @property count     현재 활성 노드 수
  *
  * ID 매핑은 bridge.ts에서 별도 관리 (Buffer Index 전략)
  */
 export interface NodeBuffer {
   positions: Float32Array;
+  scales: Float32Array;
   capacity: number;
   count: number;
 }
@@ -54,6 +58,8 @@ export function allocateNodeBuffer(
     // 예: capacity=1024 → Float32Array 길이 3072
     // 액세스: node i의 x = positions[i*3], y = positions[i*3+1], z = positions[i*3+2]
     positions: new Float32Array(capacity * 3),
+    // scales: stride=1. 기본 0 으로 채워지므로 pushNode 가 매번 명시적으로 써야 함.
+    scales: new Float32Array(capacity),
 
     capacity,
     count: 0,
@@ -80,8 +86,9 @@ export function growNodeBuffer(
 
   const newBuffer = allocateNodeBuffer(newCapacity);
 
-  // 기존 데이터 복사 (positions만 — ID 매핑은 bridge.ts 관할)
+  // 기존 데이터 복사 (positions + scales — ID 매핑은 bridge.ts 관할)
   newBuffer.positions.set(buffer.positions.subarray(0, buffer.count * 3));
+  newBuffer.scales.set(buffer.scales.subarray(0, buffer.count));
   newBuffer.count = buffer.count;
 
   return newBuffer;
@@ -94,13 +101,15 @@ export function growNodeBuffer(
  *
  * @param buffer NodeBuffer
  * @param x, y, z 좌표
+ * @param scale  (D15) instance scale. 기본 1 — depth 모르는 store 데모 노드는 1.
  * @returns 추가된 노드의 인덱스 (= Buffer Index)
  */
 export function pushNode(
   buffer: NodeBuffer,
   x: number,
   y: number,
-  z: number
+  z: number,
+  scale: number = 1
 ): number {
   if (buffer.count >= buffer.capacity) {
     throw new Error(
@@ -112,6 +121,7 @@ export function pushNode(
   buffer.positions[idx * 3] = x;
   buffer.positions[idx * 3 + 1] = y;
   buffer.positions[idx * 3 + 2] = z;
+  buffer.scales[idx] = scale;
 
   buffer.count++;
   return idx;

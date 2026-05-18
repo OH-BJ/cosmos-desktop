@@ -29,6 +29,11 @@ const idToIndex = new Map<string, number>();
 // Buffer Index → UUID 역매핑 (인덱스 i의 노드가 어떤 UUID인지)
 const indexToId: string[] = [];
 
+// (M7-2 Step 2) Buffer Index → 노드 이름 역매핑. 호버 툴팁이 이름 표시에 사용.
+//   appendChunkedNode 에서 ScannedNode.name 을 보관. syncFromStore 에선 Node 가 name
+//   필드가 없으므로 path 의 마지막 segment 를 폴백으로 사용.
+const indexToName: string[] = [];
+
 /**
  * storeNodesBoundary — syncFromStore 가 마지막으로 채운 store 노드의 경계 인덱스.
  *
@@ -50,9 +55,26 @@ export function getIndexToId(): readonly string[] {
   return indexToId;
 }
 
+/** (M7-2 Step 2) indexToName 배열 읽기 전용 접근. 호버 툴팁이 사용. */
+export function getIndexToName(): readonly string[] {
+  return indexToName;
+}
+
 /** 현재 store-origin 노드 경계 (테스트용). 청크 노드 시작 인덱스 = 이 값. */
 export function getStoreNodesBoundary(): number {
   return storeNodesBoundary;
+}
+
+/**
+ * extractNameFromPath — path 의 마지막 segment 추출 (호버 툴팁 폴백).
+ *   POSIX("/") + Windows("\\") 양쪽 구분자 처리. 빈 문자열이면 path 그대로.
+ */
+function extractNameFromPath(path: string): string {
+  const idxFwd = path.lastIndexOf("/");
+  const idxBack = path.lastIndexOf("\\");
+  const idx = Math.max(idxFwd, idxBack);
+  if (idx < 0 || idx === path.length - 1) return path;
+  return path.slice(idx + 1);
 }
 
 /**
@@ -75,6 +97,7 @@ export function syncFromStore(nodes: Node[], buffer: NodeBuffer): void {
   // 매핑 테이블 초기화
   idToIndex.clear();
   indexToId.length = 0;
+  indexToName.length = 0;
 
   // 버퍼 초기화
   buffer.count = 0;
@@ -90,6 +113,9 @@ export function syncFromStore(nodes: Node[], buffer: NodeBuffer): void {
     const bufferIndex = pushNode(buffer, node.x, node.y, node.z);
     idToIndex.set(node.id, bufferIndex);
     indexToId.push(node.id);
+    // (M7-2 Step 2) Node 에 name 필드가 없어서 path 의 마지막 segment 를 폴백.
+    //   "/test/node-a" → "node-a". Windows 경로도 마지막 \ 이후를 take.
+    indexToName.push(extractNameFromPath(node.path));
   }
 
   // M6-2 Step 3: store-origin 경계 갱신. 이후 appendChunkedNode 가 push 하는 항목은
@@ -115,9 +141,10 @@ export function clearChunkedNodes(buffer: NodeBuffer): number {
   const removed = indexToId.length - storeNodesBoundary;
   if (removed <= 0) return 0;
 
-  // 뒤에서부터 제거 (idToIndex 도 함께). pop 은 O(1).
+  // 뒤에서부터 제거 (idToIndex / indexToName 동시). pop 은 O(1).
   while (indexToId.length > storeNodesBoundary) {
     const id = indexToId.pop()!;
+    indexToName.pop();
     idToIndex.delete(id);
   }
   // buffer 잘라내기 — positions 의 stale Float32 는 남아있어도 count 가 줄어들면
@@ -148,7 +175,9 @@ export function appendChunkedNode(
   id: string,
   x: number,
   y: number,
-  z: number
+  z: number,
+  scale: number = 1,
+  name: string = id
 ): number {
   // 중복 ID 방어 (이미 등록된 ID 는 인덱스 안정성 위해 무시).
   if (idToIndex.has(id)) {
@@ -162,9 +191,10 @@ export function appendChunkedNode(
     );
     return -1;
   }
-  const idx = pushNode(buffer, x, y, z);
+  const idx = pushNode(buffer, x, y, z, scale);
   idToIndex.set(id, idx);
   indexToId.push(id);
+  indexToName.push(name);
   return idx;
 }
 

@@ -509,6 +509,111 @@ describe("CameraController", () => {
     });
   });
 
+  describe("호버 (M7-2 Step 2 — rAF + Dirty Flag throttle)", () => {
+    /**
+     * 가짜 rAF 큐. 콜백을 모아두고 flushRaf 로 수동 발사 → 한 프레임을 결정성 있게 시뮬레이트.
+     * cancelAnimationFrame 은 id 로 큐에서 제거.
+     */
+    let rafCallbacks: Map<number, FrameRequestCallback>;
+    let nextRafId: number;
+    let origRaf: typeof requestAnimationFrame | undefined;
+    let origCancel: typeof cancelAnimationFrame | undefined;
+
+    beforeEach(() => {
+      rafCallbacks = new Map();
+      nextRafId = 0;
+      origRaf = (globalThis as any).requestAnimationFrame;
+      origCancel = (globalThis as any).cancelAnimationFrame;
+      (globalThis as any).requestAnimationFrame = (
+        cb: FrameRequestCallback
+      ): number => {
+        nextRafId += 1;
+        rafCallbacks.set(nextRafId, cb);
+        return nextRafId;
+      };
+      (globalThis as any).cancelAnimationFrame = (id: number): void => {
+        rafCallbacks.delete(id);
+      };
+    });
+
+    afterEach(() => {
+      (globalThis as any).requestAnimationFrame = origRaf;
+      (globalThis as any).cancelAnimationFrame = origCancel;
+    });
+
+    function flushRaf(): void {
+      const cbs = Array.from(rafCallbacks.values());
+      rafCallbacks.clear();
+      for (const cb of cbs) cb(performance.now());
+    }
+
+    it("연속된 mousemove 가 한 프레임 안에서 onHoverPick 1회만 호출 (Dirty Flag throttle)", () => {
+      const onHoverPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      new CameraController(cam, dom, { onHoverPick });
+
+      const move = dom._listeners["pointermove"][0];
+      // 3번 연속 mousemove — 모두 같은 rAF 사이클 안.
+      move({ clientX: 10, clientY: 20 });
+      move({ clientX: 30, clientY: 40 });
+      move({ clientX: 50, clientY: 60 });
+
+      // rAF 콜백이 아직 안 돌았으면 onHoverPick 호출 X.
+      expect(onHoverPick).not.toHaveBeenCalled();
+      // rAF 는 1개만 예약돼야 한다 (이미 예약된 동안 추가 mousemove 는 dirty 만 set).
+      expect(rafCallbacks.size).toBe(1);
+
+      // 한 프레임 발사 — 마지막 좌표로 1회.
+      flushRaf();
+      expect(onHoverPick).toHaveBeenCalledTimes(1);
+      expect(onHoverPick).toHaveBeenCalledWith(50, 60);
+
+      // 같은 프레임 안에 추가 mousemove 없이 한 번 더 flush → 추가 호출 없음.
+      flushRaf();
+      expect(onHoverPick).toHaveBeenCalledTimes(1);
+    });
+
+    it("pointerleave → 대기 중 rAF 취소 + onHoverLeave 호출 + 이후 픽 미발사", () => {
+      const onHoverPick = vi.fn();
+      const onHoverLeave = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      new CameraController(cam, dom, { onHoverPick, onHoverLeave });
+
+      const move = dom._listeners["pointermove"][0];
+      const leave = dom._listeners["pointerleave"][0];
+      // 호버 진입 — rAF 1개 예약.
+      move({ clientX: 100, clientY: 100 });
+      expect(rafCallbacks.size).toBe(1);
+
+      // 캔버스 떠남 — rAF 취소 + onHoverLeave 발사.
+      leave({});
+      expect(onHoverLeave).toHaveBeenCalledTimes(1);
+      expect(rafCallbacks.size).toBe(0);
+
+      // 뒤늦게 flush 해도 픽은 안 일어난다 (취소됐기 때문).
+      flushRaf();
+      expect(onHoverPick).not.toHaveBeenCalled();
+    });
+
+    it("드래그 중 mousemove → tickHover 가 onHoverPick 스킵 (팬/호버 충돌 방지)", () => {
+      const onHoverPick = vi.fn();
+      const cam = createCamera();
+      const dom = createMockDom();
+      new CameraController(cam, dom, { onHoverPick });
+
+      const down = dom._listeners["pointerdown"][0];
+      const move = dom._listeners["pointermove"][0];
+      // 드래그 시작.
+      down({ button: 0, clientX: 0, clientY: 0 });
+      // 팬 도중 mousemove — hoverDirty 는 set 되지만 tickHover 가 isDragging 가드로 skip.
+      move({ clientX: 50, clientY: 50 });
+      flushRaf();
+      expect(onHoverPick).not.toHaveBeenCalled();
+    });
+  });
+
   describe("dispose", () => {
     it("dispose 시 window 리스너 제거 + domElement 리스너(mousedown/wheel) 제거 + cursor 복원", () => {
       const cam = createCamera();

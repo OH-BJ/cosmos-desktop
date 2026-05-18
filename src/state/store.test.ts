@@ -103,3 +103,27 @@ describe("CosmosStore.scanProgress", () => {
     expect(p.lastChunkId).toBeNull();
   });
 });
+
+/**
+ * (M7-2 Step 2) hoveredNodeId 슬라이스 — 호버 상태는 선택과 별도.
+ */
+describe("CosmosStore.hoveredNodeId", () => {
+  beforeEach(() => {
+    useCosmosStore.setState({ hoveredNodeId: null, selectedNodeId: null });
+  });
+
+  it("초기값 null, setHoveredNode 로 ID 저장/해제", () => {
+    expect(useCosmosStore.getState().hoveredNodeId).toBeNull();
+    useCosmosStore.getState().setHoveredNode("hover-a");
+    expect(useCosmosStore.getState().hoveredNodeId).toBe("hover-a");
+    useCosmosStore.getState().setHoveredNode(null);
+    expect(useCosmosStore.getState().hoveredNodeId).toBeNull();
+  });
+
+  it("호버는 선택과 독립 — selectNode 가 hoveredNodeId 를 건드리지 않음", () => {
+    useCosmosStore.getState().setHoveredNode("hover-a");
+    useCosmosStore.getState().selectNode("select-b");
+    expect(useCosmosStore.getState().hoveredNodeId).toBe("hover-a");
+    expect(useCosmosStore.getState().selectedNodeId).toBe("select-b");
+  });
+});

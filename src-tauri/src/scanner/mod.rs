@@ -180,6 +180,9 @@ where
             // (M7-1 Step 1) Fractal Orbital Packing 으로 자식 좌표 계산.
             let position =
                 coords::child_position(parent_pos, child_depth, sibling_index, sibling_total);
+            // (D15 Depth-Aware) 깊이별 인스턴스 스케일. 부모-자식 거리 비율(10×) 과
+            //   동일하게 자식 크기를 1/10 축소 → 부모 안에 자연 packing 시각 분리.
+            let scale = coords::scale_for_depth(child_depth);
 
             buffer.push(ScannedNode {
                 // UUID v7 = 시간 정렬 가능. 청크가 순서 없이 도착해도 ID 정렬로
@@ -191,6 +194,7 @@ where
                 size_bytes: p.size_bytes,
                 depth: child_depth,
                 position,
+                scale,
             });
             total_scanned += 1;
 
@@ -502,6 +506,25 @@ mod tests {
             "직계 자식 거리 ≈ 100,000, got {}",
             mag
         );
+    }
+
+    /// (D15) BFS 가 ScannedNode.scale 을 depth 별로 정확히 채우는지.
+    ///   d=1 만 들어있는 평탄 디렉토리 → 모두 scale=500.
+    #[tokio::test]
+    async fn scan_assigns_depth_aware_scale() {
+        let tmp = tempdir().expect("temp dir");
+        let sub = tmp.path().join("sub");
+        stdfs::create_dir(&sub).expect("sub 생성");
+        stdfs::File::create(sub.join("leaf.txt")).expect("leaf 생성");
+
+        let nodes = scan_directory(tmp.path().to_path_buf(), 5)
+            .await
+            .expect("스캔");
+        // d=1 (sub) → 500, d=2 (leaf.txt) → 50.
+        let sub_node = nodes.iter().find(|n| n.name == "sub").expect("sub 노드");
+        let leaf_node = nodes.iter().find(|n| n.name == "leaf.txt").expect("leaf 노드");
+        assert_eq!(sub_node.scale, 500.0, "d1 → scale 500");
+        assert_eq!(leaf_node.scale, 50.0, "d2 → scale 50");
     }
 
     /// chunked 가 종료 청크에서 잘못된 chunk_id 를 쓰지 않는지: 단조 증가 보장.

@@ -65,6 +65,36 @@ pub fn radius_for_depth(depth: u32) -> f32 {
     10.0_f32.powi(exp)
 }
 
+/// 깊이별 인스턴스 스케일 (depth-aware instance scale).
+///
+/// # 배경 (D15 노션 카드)
+/// 균일 BASE_RADIUS 가 Fractal Orbital Packing 의 계층적 거리(D1=100K → D5=10) 와
+/// 충돌해 D3+ 노드들이 한 덩어리로 겹쳐 보이는 문제 해결. 각 깊이마다 부모-자식
+/// 거리 비율(10×) 과 동일한 스케일을 부여하면 자식 노드들이 부모 안에 packing 되어도
+/// 시각적으로 분리된다.
+///
+/// 표 (월드 단위 반지름):
+/// - d=0 → 5000  (가상 root, 실제 BFS 에서는 생성 안 됨)
+/// - d=1 → 500   (D1 별자리 — 부모 거리 100K 의 5/1000)
+/// - d=2 → 50    (1/10 축소)
+/// - d=3 → 5     (1/10 축소)
+/// - d=4 → 0.5
+/// - d>=5 → 0.05 (D5 이상 모두 동일 — 더 작아지면 4px 클램프에 흡수)
+///
+/// # 셰이더 / 4×4px 클램프와의 관계
+/// 화면상 pixelDiameter = scale × P11 × H / depth (uBaseRadius=1 기준).
+/// 멀어서 4px 미만이 되면 vertex shader 가 강제 4px 로 키워 별자리 윤곽 항상 가시화.
+pub fn scale_for_depth(depth: u32) -> f32 {
+    match depth {
+        0 => 5000.0,
+        1 => 500.0,
+        2 => 50.0,
+        3 => 5.0,
+        4 => 0.5,
+        _ => 0.05,
+    }
+}
+
 /// 부모 위치 + sibling 인덱스 → 자식 위치.
 ///
 /// # 인자
@@ -222,5 +252,34 @@ mod tests {
         let child = child_position(parent, 0, 0, 1);
         // r_d = 0 → 자식 = 부모 위치
         assert_eq!(child, parent, "depth=0 은 부모 그대로");
+    }
+
+    /// scale_for_depth: D0~D5 정확한 값 + 큰 깊이 폴백.
+    #[test]
+    fn scale_for_depth_matches_spec() {
+        assert_eq!(scale_for_depth(0), 5000.0, "d0 = 5000");
+        assert_eq!(scale_for_depth(1), 500.0, "d1 = 500");
+        assert_eq!(scale_for_depth(2), 50.0, "d2 = 50");
+        assert_eq!(scale_for_depth(3), 5.0, "d3 = 5");
+        assert_eq!(scale_for_depth(4), 0.5, "d4 = 0.5");
+        assert_eq!(scale_for_depth(5), 0.05, "d5 = 0.05");
+    }
+
+    /// scale_for_depth: 큰 깊이는 D5 와 동일 값으로 클램프.
+    #[test]
+    fn scale_for_depth_clamps_to_d5_for_large_depths() {
+        assert_eq!(scale_for_depth(6), 0.05, "d6 도 d5 와 동일");
+        assert_eq!(scale_for_depth(10), 0.05, "d10 동일");
+        assert_eq!(scale_for_depth(100), 0.05, "d100 동일");
+    }
+
+    /// scale_for_depth: 10× 비율 — 인접 깊이의 scale 이 정확히 10배 차이.
+    #[test]
+    fn scale_for_depth_has_decimal_ratio() {
+        assert!((scale_for_depth(0) / scale_for_depth(1) - 10.0).abs() < 1e-3);
+        assert!((scale_for_depth(1) / scale_for_depth(2) - 10.0).abs() < 1e-3);
+        assert!((scale_for_depth(2) / scale_for_depth(3) - 10.0).abs() < 1e-3);
+        assert!((scale_for_depth(3) / scale_for_depth(4) - 10.0).abs() < 1e-3);
+        assert!((scale_for_depth(4) / scale_for_depth(5) - 10.0).abs() < 1e-3);
     }
 }

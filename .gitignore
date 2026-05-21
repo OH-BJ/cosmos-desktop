@@ -57,3 +57,6 @@ test-results
 
 # 벤치마크 결과 (대용량 JSON 등)
 benchmarks/results
+
+# Claude Code 로컬 세팅 (서브에이전트 정의/권한/락 — 협업자 공유 대상 아님)
+.claude/

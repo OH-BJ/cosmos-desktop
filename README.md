@@ -13,7 +13,7 @@
 
 ## 데모
 
-> 스크린샷 / GIF 자리 (TBA).
+![cosmos-desktop demo](./docs/assets/demo.gif)
 
 ## 핵심 기능
 
